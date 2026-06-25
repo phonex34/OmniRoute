@@ -462,7 +462,13 @@ export function openaiToClaudeRequest(model, body, stream) {
     // No role="system" messages, but body.system exists — pass through as-is
     result.system = Array.isArray(body.system)
       ? body.system
-      : [{ type: "text", text: String(body.system) }];
+      : [
+          {
+            type: "text",
+            text: String(body.system),
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ];
   }
 
   // Attach toolNameMap to result for response translation
