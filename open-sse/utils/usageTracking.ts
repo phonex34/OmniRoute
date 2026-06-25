@@ -146,6 +146,10 @@ export function addBufferToUsage(usage) {
   return result;
 }
 
+function toFiniteTokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 export function filterUsageForFormat(usage, targetFormat) {
   if (!usage || typeof usage !== "object") return usage;
 
@@ -181,6 +185,37 @@ export function filterUsageForFormat(usage, targetFormat) {
       convertedUsage.completion_tokens !== undefined
     ) {
       convertedUsage.total_tokens = convertedUsage.prompt_tokens + convertedUsage.completion_tokens;
+    }
+
+    // Claude→OpenAI prompt-cache cross-map: the OpenAI whitelist below only emits
+    // cached_tokens + prompt_tokens_details, so the Claude-style flat cache counters
+    // must be projected here or they are dropped from the SSE usage chunk — the cause
+    // of clients recording cache_read = 0 on every OmniRoute-proxied Claude request.
+    const cacheReadInput = toFiniteTokenCount(convertedUsage.cache_read_input_tokens);
+    const cacheCreationInput = toFiniteTokenCount(convertedUsage.cache_creation_input_tokens);
+    const existingDetails =
+      convertedUsage.prompt_tokens_details &&
+      typeof convertedUsage.prompt_tokens_details === "object" &&
+      !Array.isArray(convertedUsage.prompt_tokens_details)
+        ? (convertedUsage.prompt_tokens_details as Record<string, unknown>)
+        : undefined;
+    const cachedTokens =
+      toFiniteTokenCount(existingDetails?.cached_tokens) ||
+      toFiniteTokenCount(convertedUsage.cached_tokens) ||
+      cacheReadInput;
+    if (cachedTokens) {
+      if (convertedUsage.cached_tokens === undefined) {
+        convertedUsage.cached_tokens = cachedTokens;
+      }
+      const details: Record<string, unknown> = { ...(existingDetails ?? {}) };
+      if (details.cached_tokens === undefined) {
+        details.cached_tokens = cachedTokens;
+      }
+      // cache_creation has no OpenAI-spec slot; surfaced as a non-standard extension.
+      if (cacheCreationInput && details.cache_creation_tokens === undefined) {
+        details.cache_creation_tokens = cacheCreationInput;
+      }
+      convertedUsage.prompt_tokens_details = details;
     }
   }
 
