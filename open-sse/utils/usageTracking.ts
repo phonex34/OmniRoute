@@ -271,7 +271,7 @@ export function filterUsageForFormat(usage: UsageLike | null | undefined, target
       convertedUsage.prompt_tokens_details &&
       typeof convertedUsage.prompt_tokens_details === "object" &&
       !Array.isArray(convertedUsage.prompt_tokens_details)
-        ? (convertedUsage.prompt_tokens_details as Record<string, unknown>)
+        ? convertedUsage.prompt_tokens_details
         : undefined;
     const cachedTokens =
       toFiniteTokenCount(existingDetails?.cached_tokens) ||
@@ -281,7 +281,7 @@ export function filterUsageForFormat(usage: UsageLike | null | undefined, target
       if (convertedUsage.cached_tokens === undefined) {
         convertedUsage.cached_tokens = cachedTokens;
       }
-      const details: Record<string, unknown> = { ...(existingDetails ?? {}) };
+      const details: UsageTokenDetail = { ...(existingDetails ?? {}) };
       if (details.cached_tokens === undefined) {
         details.cached_tokens = cachedTokens;
       }
