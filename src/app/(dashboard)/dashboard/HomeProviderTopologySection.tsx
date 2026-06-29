@@ -17,13 +17,20 @@ type TopologyProvider = {
   status?: "active" | "error" | "idle";
 };
 
+type TopologyActiveRequest = {
+  provider: string;
+  model: string;
+};
+
 export function HomeProviderTopologySection({
   providers,
+  activeRequests = [],
   lastProvider,
   errorProvider,
   enabled = true,
 }: {
   providers: TopologyProvider[];
+  activeRequests?: TopologyActiveRequest[];
   lastProvider: string;
   errorProvider: string;
   enabled?: boolean;
@@ -35,8 +42,15 @@ export function HomeProviderTopologySection({
   // #4596: gate the live-WS connection so it only opens while the topology
   // section is actually shown on the home page.
   const { activeRequests: liveActiveRequests } = useLiveRequests({ enabled });
-  const activeRequests = selectActiveRequests(liveActiveRequests);
-  const activeProviderCount = new Set(activeRequests.map(({ provider }) => provider)).size;
+  const liveRequests = selectActiveRequests(liveActiveRequests);
+  // Keep both signals: poll-derived active requests passed in via props are
+  // merged with the live-WS feed, deduped by provider (first occurrence wins).
+  const mergedByProvider = new Map<string, TopologyActiveRequest>();
+  for (const req of [...activeRequests, ...liveRequests]) {
+    if (!mergedByProvider.has(req.provider)) mergedByProvider.set(req.provider, req);
+  }
+  const mergedActiveRequests = [...mergedByProvider.values()];
+  const activeProviderCount = new Set(mergedActiveRequests.map(({ provider }) => provider)).size;
 
   return (
     <Card>
@@ -64,7 +78,7 @@ export function HomeProviderTopologySection({
       </div>
       <ProviderTopology
         providers={providers}
-        activeRequests={activeRequests}
+        activeRequests={mergedActiveRequests}
         lastProvider={lastProvider}
         errorProvider={errorProvider}
       />
