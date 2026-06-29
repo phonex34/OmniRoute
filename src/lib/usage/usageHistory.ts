@@ -182,6 +182,7 @@ declare global {
     | {
         pendingRequests: {
           byModel: Record<string, number>;
+          byProvider: Record<string, number>;
           byAccount: Record<string, Record<string, number>>;
           details: Record<string, Record<string, PendingRequestDetail[]>>;
         };
@@ -204,6 +205,7 @@ declare global {
 const pendingState = (globalThis.__omnirouteUsageHistoryPendingState ??= {
   pendingRequests: {
     byModel: Object.create(null) as Record<string, number>,
+    byProvider: Object.create(null) as Record<string, number>,
     byAccount: Object.create(null) as Record<string, Record<string, number>>,
     details: Object.create(null) as Record<string, Record<string, PendingRequestDetail[]>>,
   },
@@ -213,6 +215,13 @@ const pendingState = (globalThis.__omnirouteUsageHistoryPendingState ??= {
 });
 
 const pendingRequests = pendingState.pendingRequests;
+
+// Snapshot of in-flight request counts per provider. Drives the dashboard
+// Provider Topology "active" (green) state: a provider is active while it has
+// at least one pending request. Mirrors byModel's +1/-1 lifecycle exactly.
+export function getPendingProviderCounts(): Record<string, number> {
+  return { ...pendingRequests.byProvider };
+}
 
 /**
  * O(1) ID → PendingRequestDetail lookup map.
@@ -335,7 +344,7 @@ function enforcePendingByteCeiling(): void {
         if (index >= 0) bucket.splice(index, 1);
       }
       cleanupPendingDetails(detail.connectionId, modelKey);
-      decrementPendingCounters(modelKey, detail.connectionId);
+      decrementPendingCounters(modelKey, detail.connectionId, detail.provider);
     }
   }
 }
@@ -403,7 +412,7 @@ export function sweepStalePendingRequests(
         if (index >= 0) bucket.splice(index, 1);
       }
       cleanupPendingDetails(detail.connectionId, modelKey);
-      decrementPendingCounters(modelKey, detail.connectionId);
+      decrementPendingCounters(modelKey, detail.connectionId, detail.provider);
     }
     removePendingCorrelationFor(detail);
     removed++;
@@ -498,7 +507,7 @@ function removePendingDetail(detail: PendingRequestDetail): boolean {
   bucket.splice(index, 1);
   forgetPendingDetail(detail, bytes);
   cleanupPendingDetails(detail.connectionId, modelKey);
-  decrementPendingCounters(modelKey, detail.connectionId);
+  decrementPendingCounters(modelKey, detail.connectionId, detail.provider);
   return true;
 }
 
@@ -540,6 +549,20 @@ export function trackPendingRequest(
     0,
     pendingRequests.byModel[modelKey] + (started ? 1 : -1)
   );
+
+  const providerKey = provider ? provider.toLowerCase() : "";
+  if (providerKey && isSafeKey(providerKey)) {
+    if (!Object.hasOwn(pendingRequests.byProvider, providerKey)) {
+      pendingRequests.byProvider[providerKey] = 0;
+    }
+    pendingRequests.byProvider[providerKey] = Math.max(
+      0,
+      pendingRequests.byProvider[providerKey] + (started ? 1 : -1)
+    );
+    if (pendingRequests.byProvider[providerKey] === 0) {
+      delete pendingRequests.byProvider[providerKey];
+    }
+  }
 
   if (connectionId) {
     if (!Object.hasOwn(pendingRequests.byAccount, connectionId)) {
@@ -711,10 +734,20 @@ export function updateRequestTokensById(id: unknown, tokens: PendingRequestDetai
  * for the non-streaming completion path where the oldest entry must be finalized
  * before trackPendingRequest(false) removes it from the FIFO queue.
  */
-function decrementPendingCounters(modelKey: string, connectionId: string) {
+function decrementPendingCounters(modelKey: string, connectionId: string, provider?: string) {
   if (Object.hasOwn(pendingRequests.byModel, modelKey)) {
     pendingRequests.byModel[modelKey] = Math.max(0, pendingRequests.byModel[modelKey] - 1);
     if (pendingRequests.byModel[modelKey] === 0) delete pendingRequests.byModel[modelKey];
+  }
+  const providerKey = provider ? provider.toLowerCase() : "";
+  if (providerKey && Object.hasOwn(pendingRequests.byProvider, providerKey)) {
+    pendingRequests.byProvider[providerKey] = Math.max(
+      0,
+      pendingRequests.byProvider[providerKey] - 1
+    );
+    if (pendingRequests.byProvider[providerKey] === 0) {
+      delete pendingRequests.byProvider[providerKey];
+    }
   }
   if (Object.hasOwn(pendingRequests.byAccount, connectionId)) {
     if (Object.hasOwn(pendingRequests.byAccount[connectionId], modelKey)) {
@@ -879,6 +912,7 @@ export function getPendingById(): Map<string, PendingRequestDetail> {
  */
 export function clearPendingRequests() {
   pendingRequests.byModel = Object.create(null) as Record<string, number>;
+  pendingRequests.byProvider = Object.create(null) as Record<string, number>;
   pendingRequests.byAccount = Object.create(null) as Record<string, Record<string, number>>;
   pendingRequests.details = Object.create(null) as Record<
     string,
