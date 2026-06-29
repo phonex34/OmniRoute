@@ -474,6 +474,10 @@ function useTrafficSets(activeRequests: ModelRef[], lastProvider: string, errorP
   );
   const lastKey = lastProvider.toLowerCase();
   const errorKey = errorProvider.toLowerCase();
+
+  // Trusted as-is, no client-side time-clipping: activeRequests is poll-authoritative
+  // (server pendingRequests counter, self-clears when pending hits 0; leaks bounded by
+  // the server sweep). Clipping here would wrongly drop a long-running streaming request.
   const activeSet = useMemo(
     () => new Set<string>(activeKey ? activeKey.split(",") : []),
     [activeKey]
