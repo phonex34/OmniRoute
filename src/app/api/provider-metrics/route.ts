@@ -4,6 +4,7 @@ import pino from "pino";
 import { buildErrorBody } from "@omniroute/open-sse/utils/error.ts";
 
 import { getProviderMetrics } from "@/lib/db/callLogStats";
+import { getPendingProviderCounts } from "@/lib/usageDb";
 import { toNumber, toNumberOrNull } from "@/shared/utils/numeric";
 
 const logger = pino({ name: "provider-metrics-api" });
@@ -74,12 +75,16 @@ export async function GET() {
       }
     }
 
+    const pending = getPendingProviderCounts();
+
     return NextResponse.json({
       metrics,
+      pending,
       topology: {
         providers: Object.keys(metrics),
         lastProvider,
         errorProvider,
+        activeProviders: Object.keys(pending),
       },
     });
   } catch (error) {
