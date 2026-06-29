@@ -130,6 +130,7 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
   );
   const [selectedProvider, setSelectedProvider] = useState(null);
   const [providerMetrics, setProviderMetrics] = useState<Record<string, ProviderMetricSummary>>({});
+  const [pendingByProvider, setPendingByProvider] = useState<Record<string, number>>({});
   const [providerTopology, setProviderTopology] = useState({ lastProvider: "", errorProvider: "" });
   const [providerNodes, setProviderNodes] = useState<
     Array<{ id?: string; prefix?: string; name?: string }>
@@ -310,6 +311,7 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
           const data = await metricsRes.json();
           if (!cancelled) {
             setProviderMetrics(data.metrics || {});
+            setPendingByProvider(data.pending || {});
             setProviderTopology({
               lastProvider: normalizeProviderId(data.topology?.lastProvider),
               errorProvider: normalizeProviderId(data.topology?.errorProvider),
@@ -523,6 +525,14 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
   }, [providerStats, providerMetrics, providerNodes, providerConnections]);
 
   const { lastProvider, errorProvider } = providerTopology;
+
+  const activeProviderRequests = useMemo(
+    () =>
+      Object.entries(pendingByProvider)
+        .filter(([, count]) => count > 0)
+        .map(([provider]) => ({ provider: normalizeProviderId(provider), model: "" })),
+    [pendingByProvider]
+  );
 
   const pollBackgroundUpdate = useCallback(
     async ({
@@ -1141,6 +1151,7 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
         <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-3">
           <HomeProviderTopologySection
             providers={topologyProviders}
+            activeRequests={activeProviderRequests}
             lastProvider={lastProvider}
             errorProvider={errorProvider}
             enabled={showProviderTopologyOnHome}
