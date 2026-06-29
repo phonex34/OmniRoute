@@ -19,6 +19,7 @@ import { getProviderDisplayLabel } from "@/shared/utils/providerDisplayLabel";
 import { useIsElectron, useOpenExternal } from "@/shared/hooks/useElectron";
 import { HomeProviderTopologySection } from "./HomeProviderTopologySection";
 import { shouldShowProviderTopologyOnHome } from "./homeAppearance";
+import { computeTopologyStatus } from "../home/topologyUtils";
 
 type UpdateStep = {
   step: string;
@@ -117,7 +118,7 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
   const [baseUrl, setBaseUrl] = useState("/v1");
   const [selectedProvider, setSelectedProvider] = useState(null);
   const [providerMetrics, setProviderMetrics] = useState<Record<string, ProviderMetricSummary>>({});
-  const [providerTopology, setProviderTopology] = useState({ lastProvider: "", errorProvider: "" });
+  const [pendingByProvider, setPendingByProvider] = useState<Record<string, number>>({});
   const [providerNodes, setProviderNodes] = useState<
     Array<{ id?: string; prefix?: string; name?: string }>
   >([]);
@@ -298,10 +299,7 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
           const data = await metricsRes.json();
           if (!cancelled) {
             setProviderMetrics(data.metrics || {});
-            setProviderTopology({
-              lastProvider: normalizeProviderId(data.topology?.lastProvider),
-              errorProvider: normalizeProviderId(data.topology?.errorProvider),
-            });
+            setPendingByProvider(data.pending || {});
           }
         }
       } catch (error) {
@@ -510,7 +508,18 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
     return Array.from(byProvider.values());
   }, [providerStats, providerMetrics, providerNodes, providerConnections]);
 
-  const { lastProvider, errorProvider } = providerTopology;
+  const { lastProvider, errorProvider } = useMemo(
+    () => computeTopologyStatus(providerMetrics, normalizeProviderId),
+    [providerMetrics]
+  );
+
+  const activeProviderRequests = useMemo(
+    () =>
+      Object.entries(pendingByProvider)
+        .filter(([, count]) => count > 0)
+        .map(([provider]) => ({ provider: normalizeProviderId(provider), model: "" })),
+    [pendingByProvider]
+  );
 
   const pollBackgroundUpdate = useCallback(
     async ({
@@ -1128,6 +1137,7 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
       {showProviderTopologyOnHome && (
         <HomeProviderTopologySection
           providers={topologyProviders}
+          activeRequests={activeProviderRequests}
           lastProvider={lastProvider}
           errorProvider={errorProvider}
           enabled={showProviderTopologyOnHome}
