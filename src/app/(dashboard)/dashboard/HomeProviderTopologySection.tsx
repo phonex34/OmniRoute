@@ -4,8 +4,6 @@ import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
 
 import { Card } from "@/shared/components";
-import { useLiveRequests } from "@/hooks/useLiveDashboard";
-import { selectActiveRequests } from "../home/topologyUtils";
 
 const ProviderTopology = dynamic(() => import("../home/ProviderTopology"), { ssr: false });
 
@@ -17,13 +15,19 @@ type TopologyProvider = {
   status?: "active" | "error" | "idle";
 };
 
+type TopologyActiveRequest = {
+  provider: string;
+  model: string;
+};
+
 export function HomeProviderTopologySection({
   providers,
+  activeRequests = [],
   lastProvider,
   errorProvider,
-  enabled = true,
 }: {
   providers: TopologyProvider[];
+  activeRequests?: TopologyActiveRequest[];
   lastProvider: string;
   errorProvider: string;
   enabled?: boolean;
@@ -32,10 +36,8 @@ export function HomeProviderTopologySection({
   const tCommon = useTranslations("common");
   const tSettings = useTranslations("settings");
   const tAnalytics = useTranslations("analytics");
-  // #4596: gate the live-WS connection so it only opens while the topology
-  // section is actually shown on the home page.
-  const { activeRequests: liveActiveRequests } = useLiveRequests({ enabled });
-  const activeRequests = selectActiveRequests(liveActiveRequests);
+  // Active requests are poll-derived by HomePageClient (pending counts from
+  // /api/provider-metrics) and passed in, so this section opens no live socket.
   const activeProviderCount = new Set(activeRequests.map(({ provider }) => provider)).size;
 
   return (
