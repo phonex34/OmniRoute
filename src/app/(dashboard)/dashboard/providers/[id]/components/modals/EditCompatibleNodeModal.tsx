@@ -45,9 +45,11 @@ export default function EditCompatibleNodeModal({
   const [checkKey, setCheckKey] = useState("");
   const [checkModelId, setCheckModelId] = useState("");
   const [validating, setValidating] = useState(false);
-  const [validationResult, setValidationResult] = useState<
-    null | { valid: boolean; error?: string | null; method?: string | null }
-  >(null);
+  const [validationResult, setValidationResult] = useState<null | {
+    valid: boolean;
+    error?: string | null;
+    method?: string | null;
+  }>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
@@ -87,7 +89,7 @@ export default function EditCompatibleNodeModal({
   ];
 
   const handleSubmit = async () => {
-    if (!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim()) return;
+    if (!formData.name.trim() || !formData.baseUrl.trim()) return;
     setSaving(true);
     try {
       const payload: any = {
@@ -303,9 +305,7 @@ export default function EditCompatibleNodeModal({
           <Button
             onClick={handleSubmit}
             fullWidth
-            disabled={
-              !formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim() || saving
-            }
+            disabled={!formData.name.trim() || !formData.baseUrl.trim() || saving}
           >
             {saving ? t("saving") : t("save")}
           </Button>
