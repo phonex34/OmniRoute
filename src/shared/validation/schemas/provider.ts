@@ -310,9 +310,11 @@ export const createProviderNodeSchema = z
   .object({
     // #6874: name/prefix are required in general, but a `preset` (e.g.
     // "vibeproxy-openai") supplies both — enforced conditionally below
-    // instead of unconditionally here.
+    // instead of unconditionally here. Field-level stays optional so the
+    // preset path validates; `prefix` keeps the min(1) guard for non-empty
+    // values ("make prefix optional", 39a6ceebd).
     name: z.string().trim().optional().or(z.literal("")),
-    prefix: z.string().trim().optional().or(z.literal("")),
+    prefix: z.string().trim().min(1).optional().or(z.literal("")),
     apiType: z
       .enum([
         "chat",
@@ -379,7 +381,7 @@ export const createProviderNodeSchema = z
 
 export const updateProviderNodeSchema = z.object({
   name: z.string().trim().min(1, "Name is required"),
-  prefix: z.string().trim().min(1, "Prefix is required"),
+  prefix: z.string().trim().min(1).optional().or(z.literal("")),
   apiType: z
     .enum([
       "chat",
