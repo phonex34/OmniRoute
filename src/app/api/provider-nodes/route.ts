@@ -93,7 +93,7 @@ export async function POST(request) {
       const node = await createProviderNode({
         id: `${OPENAI_COMPATIBLE_PREFIX}${apiType}-${generateId()}`,
         type: "openai-compatible",
-        prefix: prefix.trim(),
+        prefix: prefix?.trim() || null,
         apiType,
         baseUrl: resolvedBaseUrl,
         name: name.trim(),
@@ -124,7 +124,7 @@ export async function POST(request) {
             ? `${CLAUDE_CODE_COMPATIBLE_PREFIX}${generateId()}`
             : `${ANTHROPIC_COMPATIBLE_PREFIX}${generateId()}`,
         type: "anthropic-compatible",
-        prefix: prefix.trim(),
+        prefix: prefix?.trim() || null,
         baseUrl: sanitizedBaseUrl,
         name: name.trim(),
         chatPath: chatPath || null,

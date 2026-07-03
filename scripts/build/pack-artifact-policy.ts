@@ -49,7 +49,7 @@ export const APP_STAGING_ALLOWED_EXACT_PATHS: string[] = [
   "main-server-timeouts.mjs",
   "responses-ws-proxy.mjs",
   "scripts/dev/sync-env.mjs",
-  "scripts/dev/tls-options.mjs",
+  "tls-options.mjs",
   "server.js",
   "server-ws.mjs",
   // #5452: dist/tls-options.mjs is copied by assembleStandalone (EXTRA_MODULE_ENTRIES)
@@ -151,6 +151,7 @@ export const PACK_ARTIFACT_REQUIRED_PATHS: string[] = [
   "dist/open-sse/services/compression/rules/en/filler.json",
   "dist/server.js",
   "dist/server-ws.mjs",
+  "dist/tls-options.mjs",
   "dist/responses-ws-proxy.mjs",
   "dist/peer-stamp.mjs",
   "dist/main-server-timeouts.mjs",

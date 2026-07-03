@@ -492,9 +492,7 @@ export default function ProviderOnboardingWizard() {
     }
   };
 
-  const customReady = Boolean(
-    customForm.name.trim() && customForm.prefix.trim() && customForm.baseUrl.trim()
-  );
+  const customReady = Boolean(customForm.name.trim() && customForm.baseUrl.trim());
   const apiKeyReady = Boolean(
     selectedProvider &&
     apiKeyForm.name.trim() &&

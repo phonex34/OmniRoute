@@ -4100,7 +4100,7 @@
     "prefixLabel": "Prefix",
     "baseUrlLabel": "Base URL",
     "apiTypeLabel": "API Type",
-    "prefixHint": "Required. Unique prefix for model names.",
+    "prefixHint": "Optional. Unique prefix for model names.",
     "nameHint": "Required. A friendly label for this node.",
     "baseUrlHint": "Required. Provider API base URL.",
     "iconUrlLabel": "Icon URL",
