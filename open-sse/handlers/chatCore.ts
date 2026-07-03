@@ -74,6 +74,7 @@ import {
   stampNativeResponsesPassthroughBody,
   redactPassthroughThinkingSignatures,
   stripClaudeRejectedTopLevelFields,
+  sanitizeClaudePassthroughThinkingBlocks,
   isClaudeCodeSemanticPassthroughRequest,
 } from "./chatCore/passthroughHelpers.ts";
 
@@ -88,6 +89,7 @@ export {
   shouldUseNativeCodexPassthrough,
   shouldUseNativeXaiResponsesPassthrough,
   redactPassthroughThinkingSignatures,
+  sanitizeClaudePassthroughThinkingBlocks,
   isClaudeCodeSemanticPassthroughRequest,
   buildStreamingResponseHeaders,
   stripStaleForwardingHeaders,
@@ -2403,6 +2405,18 @@ async function handleChatCoreInner({
           translatedBody.messages
         ) as typeof translatedBody.messages;
 
+        // Keep replayed thinking blocks whose signature is safe for the target model,
+        // drop the rest (#2454/#5108/#5312): a signature is model-bound server-side, so a
+        // combo model hop (opus→sonnet) or an empty/foreign one would 400. Preserving the
+        // rest keeps the reasoning chain on same-model multi-turn.
+        translatedBody.messages = sanitizeClaudePassthroughThinkingBlocks(
+          translatedBody.messages,
+          effectiveModel
+        ) as typeof translatedBody.messages;
+
+        // Drops the top-level fields Anthropic rejects on the verbatim native
+        // passthrough — including the temperature+top_p pair the VS Code Claude
+        // extension sends, and `safeguards` when its paired beta is not forwarded.
         stripClaudeRejectedTopLevelFields(translatedBody, clientRawRequest?.headers);
       }
 
