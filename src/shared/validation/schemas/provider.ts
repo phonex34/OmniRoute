@@ -298,11 +298,13 @@ export const removeModelAliasSchema = z.object({
 
 export const createProviderNodeSchema = z
   .object({
-    // #6874: name/prefix are required in general, but a `preset` (e.g.
-    // "vibeproxy-openai") supplies both — enforced conditionally below
+    // #6874: name is required in general, but a `preset` (e.g.
+    // "vibeproxy-openai") supplies it — enforced conditionally below
     // instead of unconditionally here.
     name: z.string().trim().optional().or(z.literal("")),
-    prefix: z.string().trim().optional().or(z.literal("")),
+    // Prefix is optional: when omitted the node is stored with a NULL prefix
+    // and model names are not prefixed.
+    prefix: z.string().trim().min(1).optional().or(z.literal("")),
     apiType: z
       .enum([
         "chat",
@@ -351,13 +353,6 @@ export const createProviderNodeSchema = z
         path: ["name"],
       });
     }
-    if (!value.prefix || !value.prefix.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Prefix is required",
-        path: ["prefix"],
-      });
-    }
     if (nodeType === "openai-compatible" && !value.apiType) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -369,7 +364,7 @@ export const createProviderNodeSchema = z
 
 export const updateProviderNodeSchema = z.object({
   name: z.string().trim().min(1, "Name is required"),
-  prefix: z.string().trim().min(1, "Prefix is required"),
+  prefix: z.string().trim().min(1).optional().or(z.literal("")),
   apiType: z
     .enum([
       "chat",
