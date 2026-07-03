@@ -92,6 +92,7 @@ import {
   shouldUseNativeOpenAICompatibleResponsesPassthrough,
   stampNativeResponsesPassthroughBody,
   redactPassthroughThinkingSignatures,
+  sanitizeClaudePassthroughThinkingBlocks,
   isClaudeCodeSemanticPassthroughRequest,
 } from "./chatCore/passthroughHelpers.ts";
 import { recoverAnthropicThinkingSignature } from "./chatCore/thinkingSignatureRecovery.ts";
@@ -111,6 +112,7 @@ export {
   shouldUseNativeCodexPassthrough,
   shouldUseNativeXaiResponsesPassthrough,
   redactPassthroughThinkingSignatures,
+  sanitizeClaudePassthroughThinkingBlocks,
   isClaudeCodeSemanticPassthroughRequest,
   buildStreamingResponseHeaders,
   stripStaleForwardingHeaders,
@@ -2275,6 +2277,15 @@ export async function handleChatCore({
         translatedBody.messages = redactPassthroughThinkingSignatures(
           translatedBody.messages,
           DEFAULT_THINKING_CLAUDE_SIGNATURE
+        ) as typeof translatedBody.messages;
+
+        // Keep replayed thinking blocks whose signature is safe for the target model,
+        // drop the rest (#2454/#5108/#5312): a signature is model-bound server-side, so a
+        // combo model hop (opus→sonnet) or an empty/foreign one would 400. Preserving the
+        // rest keeps the reasoning chain on same-model multi-turn.
+        translatedBody.messages = sanitizeClaudePassthroughThinkingBlocks(
+          translatedBody.messages,
+          effectiveModel
         ) as typeof translatedBody.messages;
 
         // Anthropic API rejects requests with both temperature and top_p.
