@@ -205,9 +205,8 @@ export default function AddCompatibleProviderModal({
   const chatPathHint = mode === "cc" ? t("ccCompatibleChatPathHint") : t("chatPathHint");
   const advancedId = `advanced-settings-${mode}`;
   const isCustomJson = defaults.hasApiType && formData.apiType === CUSTOM_JSON_API_TYPE;
-  const hasRequiredFields = Boolean(
-    formData.name.trim() && formData.prefix.trim() && formData.baseUrl.trim()
-  );
+  // Prefix is optional: only name + base URL gate submission.
+  const hasRequiredFields = Boolean(formData.name.trim() && formData.baseUrl.trim());
   const canValidate = Boolean(
     (checkKey.trim() || (isCustomJson && customJson.authType === "none")) && formData.baseUrl.trim()
   );

@@ -173,6 +173,10 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
       return NextResponse.json({ error: "Invalid OpenAI compatible API type" }, { status: 400 });
     }
 
+    // Prefix is optional in updateProviderNodeSchema: an omitted field keeps the
+    // stored prefix, an empty string clears it.
+    const resolvedPrefix = prefix === undefined ? (node.prefix ?? "") : prefix.trim();
+
     const sanitizedBaseUrl = sanitizeNodeBaseUrl(node.type, id, baseUrl.trim());
     const baseUrlError = validateProviderNodeBaseUrl(sanitizedBaseUrl);
     if (baseUrlError) return baseUrlError;
@@ -186,7 +190,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
     const updates: Record<string, unknown> = {
       name: name.trim(),
-      prefix: prefix.trim(),
+      prefix: resolvedPrefix || null,
       baseUrl: sanitizedBaseUrl,
       chatPath: chatPath || null,
       modelsPath: isClaudeCodeCompatibleProvider(id) ? null : modelsPath || null,
@@ -206,10 +210,10 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
     const updated = await updateProviderNode(id, updates);
 
-    await reregisterMoonshotFetcher(updated, id, prefix.trim(), sanitizedBaseUrl);
+    await reregisterMoonshotFetcher(updated, id, resolvedPrefix, sanitizedBaseUrl);
 
     await syncNodeConnections(id, updated, {
-      prefix: prefix.trim(),
+      prefix: resolvedPrefix,
       baseUrl: sanitizedBaseUrl,
       apiType: node.type === "openai-compatible" ? apiType : undefined,
       customJsonConfig: customJsonNode.config,

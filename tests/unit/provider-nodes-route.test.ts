@@ -336,3 +336,80 @@ test("provider nodes update route blocks cloud metadata base URLs by default", a
   ]);
   assert.equal(stored?.baseUrl, "https://proxy.example.com/v1");
 });
+
+test("provider nodes route creates nodes without a prefix", async () => {
+  const response = await providerNodesRoute.POST(
+    makeRequest({
+      name: "No Prefix Proxy",
+      apiType: "chat",
+      baseUrl: "https://noprefix.example.com/v1",
+    })
+  );
+  const body = (await response.json()) as any;
+  const stored = await providersDb.getProviderNodeById(body.node.id);
+
+  assert.equal(response.status, 201);
+  assert.equal(body.node.prefix, null);
+  assert.equal(stored?.prefix, null);
+});
+
+test("provider nodes update route keeps the stored prefix when the field is omitted", async () => {
+  const created = await providersDb.createProviderNode({
+    id: "openai-compatible-chat-prefix-omitted",
+    name: "Prefix Keeper",
+    prefix: "keep-me",
+    type: "openai-compatible",
+    apiType: "chat",
+    baseUrl: "https://proxy.example.com/v1",
+  });
+
+  const response = await providerNodesIdRoute.PUT(
+    new Request(`http://localhost/api/provider-nodes/${created.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Prefix Keeper",
+        apiType: "chat",
+        baseUrl: "https://proxy.example.com/v1",
+      }),
+    }),
+    { params: Promise.resolve({ id: created.id as string }) }
+  );
+  const body = (await response.json()) as any;
+  const stored = await providersDb.getProviderNodeById(created.id as string);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.node.prefix, "keep-me");
+  assert.equal(stored?.prefix, "keep-me");
+});
+
+test("provider nodes update route clears the prefix when an empty string is sent", async () => {
+  const created = await providersDb.createProviderNode({
+    id: "openai-compatible-chat-prefix-cleared",
+    name: "Prefix Cleared",
+    prefix: "drop-me",
+    type: "openai-compatible",
+    apiType: "chat",
+    baseUrl: "https://proxy.example.com/v1",
+  });
+
+  const response = await providerNodesIdRoute.PUT(
+    new Request(`http://localhost/api/provider-nodes/${created.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Prefix Cleared",
+        prefix: "",
+        apiType: "chat",
+        baseUrl: "https://proxy.example.com/v1",
+      }),
+    }),
+    { params: Promise.resolve({ id: created.id as string }) }
+  );
+  const body = (await response.json()) as any;
+  const stored = await providersDb.getProviderNodeById(created.id as string);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.node.prefix, null);
+  assert.equal(stored?.prefix, null);
+});
