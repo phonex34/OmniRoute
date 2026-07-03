@@ -78,6 +78,7 @@ import {
   shouldUseNativeOpenAICompatibleResponsesPassthrough,
   stampNativeResponsesPassthroughBody,
   redactPassthroughThinkingSignatures,
+  sanitizeClaudePassthroughThinkingBlocks,
   isClaudeCodeSemanticPassthroughRequest,
 } from "./chatCore/passthroughHelpers.ts";
 
@@ -95,6 +96,7 @@ export {
   shouldUseNativeCodexPassthrough,
   shouldUseNativeXaiResponsesPassthrough,
   redactPassthroughThinkingSignatures,
+  sanitizeClaudePassthroughThinkingBlocks,
   isClaudeCodeSemanticPassthroughRequest,
   buildStreamingResponseHeaders,
   stripStaleForwardingHeaders,
