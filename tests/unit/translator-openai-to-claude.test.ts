@@ -278,9 +278,7 @@ test("OpenAI -> Claude does not leave tool results separated from their tool use
     (message) =>
       message.role === "user" &&
       message.content.some(
-        (block) =>
-          block.type === "text" &&
-          block.text === "Please wait before using that result."
+        (block) => block.type === "text" && block.text === "Please wait before using that result."
       )
   );
   assert.ok(
@@ -720,4 +718,52 @@ test("OpenAI -> Claude treats developer role as system (fix for Responses API â†
   // Exactly one user message
   const userMessages = result.messages.filter((m) => m.role === "user");
   assert.equal(userMessages.length, 1, "expected exactly one user message");
+});
+
+// Anthropic rejects oneOf/allOf/anyOf at the top level of a tool input_schema.
+// The openai->claude translation must flatten the root while preserving nested
+// combinators. Production incident 2026-07-06 (opencode + MCP tools -> claude).
+test("OpenAI -> Claude flattens top-level anyOf in tool input_schema, preserving nested", () => {
+  const body = {
+    model: "claude-opus-4-8",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "atlassian_do",
+          description: "top-level anyOf tool",
+          parameters: {
+            anyOf: [
+              { type: "null" },
+              {
+                type: "object",
+                properties: {
+                  cloudId: { type: "string" },
+                  detail: { anyOf: [{ type: "string" }, { type: "number" }] },
+                },
+                required: ["cloudId"],
+              },
+            ],
+          },
+        },
+      },
+    ],
+  };
+
+  const result = openaiToClaudeRequest("claude-opus-4-8", body, false);
+  const tool = result.tools.find((t: { name: string }) => t.name.endsWith("atlassian_do"));
+  assert.ok(tool, "tool should be translated");
+
+  const schema = tool.input_schema as Record<string, unknown>;
+  assert.equal(schema.anyOf, undefined, "top-level anyOf must be flattened away");
+  assert.equal(schema.oneOf, undefined);
+  assert.equal(schema.allOf, undefined);
+  assert.equal(schema.type, "object");
+  const properties = schema.properties as Record<string, Record<string, unknown>>;
+  assert.ok(properties.cloudId, "object variant properties are merged up");
+  assert.ok(
+    Array.isArray(properties.detail.anyOf),
+    "nested anyOf inside a property must be preserved"
+  );
 });
