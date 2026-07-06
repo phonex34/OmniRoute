@@ -3,7 +3,7 @@ import { FORMATS } from "../formats.ts";
 // CLAUDE_SYSTEM_PROMPT import removed — no longer injected unconditionally (#1966/#2130)
 import { supportsClaudeMaxEffort, supportsXHighEffort } from "../../config/providerModels.ts";
 import { adjustMaxTokens } from "../helpers/maxTokensHelper.ts";
-import { sanitizeToolId } from "../helpers/schemaCoercion.ts";
+import { flattenTopLevelClaudeCombinators, sanitizeToolId } from "../helpers/schemaCoercion.ts";
 import { safeParseJSON } from "../helpers/jsonUtil.ts";
 import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 import { isAdaptiveThinkingOnly } from "../../../src/shared/constants/modelSpecs.ts";
@@ -396,10 +396,15 @@ export function openaiToClaudeRequest(model, body, stream) {
             ? { ...rawSchema, properties: {} }
             : rawSchema;
 
+        // Anthropic rejects oneOf/allOf/anyOf at the top level of input_schema.
+        // Flatten only the root (nested combinators stay valid). Covers the
+        // API-key claude path, which skips the OAuth-only sanitizeClaudeToolSchemas.
+        const safeSchema = flattenTopLevelClaudeCombinators(normalizedSchema);
+
         return {
           name: toolName,
           description: toolData.description || "",
-          input_schema: normalizedSchema,
+          input_schema: safeSchema,
         };
       })
       .filter((tool): tool is ClaudeTool => Boolean(tool));
