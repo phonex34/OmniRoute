@@ -265,3 +265,4 @@ docker-compose.yml.bak
 # output/**/.playwright-cli/ (covered above), but anything written directly to
 # output/ would otherwise show up as untracked.
 /output/
+.omo/
