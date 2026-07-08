@@ -293,3 +293,8 @@ docker-compose.yml.bak
 # Ad-hoc test sandboxes (never tracked — may contain local DBs)
 /.sandbox/
 .aider*
+# Playwright screenshot/log output. Today every artifact happens to land inside
+# output/**/.playwright-cli/ (covered above), but anything written directly to
+# output/ would otherwise show up as untracked.
+/output/
+.omo/
