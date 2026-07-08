@@ -281,3 +281,9 @@ docker-compose.yml.bak
 
 # CLI local cache/state
 .playwright-cli
+
+# Playwright screenshot/log output. Today every artifact happens to land inside
+# output/**/.playwright-cli/ (covered above), but anything written directly to
+# output/ would otherwise show up as untracked.
+/output/
+.omo/
