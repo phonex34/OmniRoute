@@ -17,6 +17,7 @@
  */
 
 import { getUsageForProvider, USAGE_FETCHER_PROVIDERS } from "./usage.ts";
+import { getLatestQuotaSnapshotsForConnection } from "@/lib/db/quotaSnapshots";
 import {
   getQuotaFetcher,
   registerQuotaFetcher,
@@ -25,14 +26,22 @@ import {
   type QuotaInfo,
 } from "./quotaPreflight.ts";
 
-// 60s — matches Codex's TTL. Long enough to avoid hammering upstream usage
-// endpoints on every routing decision, short enough that a near-exhausted
-// account is skipped within one minute of crossing its threshold.
-const CACHE_TTL_MS = 60_000;
+// Adaptive TTL bounds. The old fixed 60s TTL still hit Anthropic's touchy
+// usage endpoint ~60x/hour on a chat-heavy account with a cutoff set (one
+// fetch per expiry). We now trust the cache far longer when the account is
+// nowhere near its cutoff, and only refetch briefly when it approaches one —
+// the real 429 → invalidateGenericQuotaCache + cooldown path is the backstop.
+const HARD_TTL_CEILING_MS = 90 * 60_000;
+const MIN_TTL_MS = 15_000;
+const GLOBAL_DEFAULT_MIN_REMAINING_PERCENT = 2;
+// Snapshots older than this (written by the quotaCache background tick / the
+// 70-min provider-limits sync) are too stale to reuse for preflight.
+const SNAPSHOT_REUSE_MAX_AGE_MS = 90 * 60_000;
 
 interface CacheEntry {
   quota: QuotaInfo;
   fetchedAt: number;
+  expiresAt: number;
 }
 
 const cache = new Map<string, CacheEntry>();
@@ -41,11 +50,10 @@ function cacheKey(provider: string, connectionId: string): string {
   return `${provider}::${connectionId}`;
 }
 
-// Auto-cleanup stale entries — same shape as codexQuotaFetcher.
 const _cacheCleanup = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of cache) {
-    if (now - entry.fetchedAt > CACHE_TTL_MS * 5) cache.delete(key);
+    if (now - entry.fetchedAt > HARD_TTL_CEILING_MS * 2) cache.delete(key);
   }
 }, 5 * 60_000);
 if (typeof _cacheCleanup === "object" && "unref" in _cacheCleanup) {
@@ -108,6 +116,101 @@ interface ConnectionInputs {
   providerSpecificData?: Record<string, unknown>;
   projectId?: string;
   email?: string;
+  quotaWindowThresholds?: Record<string, number> | null;
+}
+
+/**
+ * Per-connection cutoff for a window (0–100 min-remaining %), read from the
+ * same `quotaWindowThresholds` map the preflight evaluator uses. Falls back to
+ * the 2% global default when unset — a larger headroom → longer TTL, which is
+ * the safe direction (over-trusting is caught by the 429 backstop).
+ */
+function resolveCutoffPercent(conn: ConnectionInputs, windowName: string): number {
+  const overrides = conn.quotaWindowThresholds;
+  if (overrides && typeof overrides === "object") {
+    const n = toNumber(overrides[windowName]);
+    if (n !== null && n >= 0 && n <= 100) return n;
+  }
+  return GLOBAL_DEFAULT_MIN_REMAINING_PERCENT;
+}
+
+/** Longer TTL the further the worst window sits above its cutoff. */
+function bucketTtlForHeadroom(headroomPercent: number): number {
+  if (headroomPercent > 40) return HARD_TTL_CEILING_MS;
+  if (headroomPercent > 20) return 15 * 60_000;
+  if (headroomPercent > 8) return 3 * 60_000;
+  if (headroomPercent > 3) return 45_000;
+  return MIN_TTL_MS;
+}
+
+/**
+ * Adaptive TTL from the worst (closest-to-cutoff) window, clamped to the
+ * soonest future resetAt (past the reset the cached numbers describe the old
+ * window) and the hard ceiling.
+ */
+export function computeAdaptiveTtl(quota: QuotaInfo, conn: ConnectionInputs, now: number): number {
+  if (quota.limitReached) return MIN_TTL_MS;
+
+  let minHeadroom = Infinity;
+  let soonestResetMs: number | null = null;
+  const windows = quota.windows || {};
+  const names = Object.keys(windows);
+
+  if (names.length === 0) {
+    const remaining = Math.max(0, (1 - quota.percentUsed) * 100);
+    minHeadroom = remaining - GLOBAL_DEFAULT_MIN_REMAINING_PERCENT;
+  } else {
+    for (const name of names) {
+      const w = windows[name];
+      if (!Number.isFinite(w.percentUsed)) continue;
+      const remaining = Math.max(0, (1 - w.percentUsed) * 100);
+      const headroom = remaining - resolveCutoffPercent(conn, name);
+      if (headroom < minHeadroom) minHeadroom = headroom;
+      if (w.resetAt) {
+        const t = Date.parse(w.resetAt);
+        if (Number.isFinite(t) && t > now && (soonestResetMs === null || t < soonestResetMs)) {
+          soonestResetMs = t;
+        }
+      }
+    }
+  }
+
+  if (!Number.isFinite(minHeadroom)) return MIN_TTL_MS;
+
+  let ttl = Math.min(bucketTtlForHeadroom(minHeadroom), HARD_TTL_CEILING_MS);
+  if (soonestResetMs !== null) ttl = Math.min(ttl, Math.max(MIN_TTL_MS, soonestResetMs - now));
+  return Math.max(MIN_TTL_MS, ttl);
+}
+
+/**
+ * Reuse the quota data the background layers already fetched: the
+ * `quota_snapshots` table is written every ~1 min by the quotaCache tick and
+ * by the 70-min provider-limits sync. Reading it here lets preflight avoid its
+ * own upstream call entirely on the common path — the fix for the 429 storm.
+ * Returns null when there's no fresh-enough snapshot, so the caller fetches.
+ */
+function quotaFromRecentSnapshots(connectionId: string, now: number): QuotaInfo | null {
+  let rows;
+  try {
+    rows = getLatestQuotaSnapshotsForConnection(connectionId);
+  } catch {
+    return null;
+  }
+  if (!rows || rows.length === 0) return null;
+
+  const quotas: Record<string, { remainingPercentage: number; resetAt: string | null }> = {};
+  for (const row of rows) {
+    const windowKey = row.window_key;
+    if (!windowKey) continue;
+    const createdMs = row.created_at ? Date.parse(row.created_at) : NaN;
+    if (!Number.isFinite(createdMs) || now - createdMs > SNAPSHOT_REUSE_MAX_AGE_MS) return null;
+    quotas[windowKey] = {
+      remainingPercentage: Number(row.remaining_percentage ?? 0),
+      resetAt: row.next_reset_at ?? null,
+    };
+  }
+  if (Object.keys(quotas).length === 0) return null;
+  return convertUsageToQuotaInfo({ quotas });
 }
 
 /**
@@ -173,11 +276,28 @@ export const fetchGenericQuota: QuotaFetcher = async (connectionId, connection) 
   if (!provider) return null;
 
   const key = cacheKey(provider, connectionId);
+  const now = Date.now();
+
+  // Tier 1: our own cache, trusted until its adaptive expiry.
   const cached = cache.get(key);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+  if (cached && now < cached.expiresAt) {
     return cached.quota;
   }
 
+  // Tier 2: reuse a fresh-enough snapshot the background layers already
+  // fetched, so preflight avoids its own upstream usage call on the hot path.
+  const fromSnapshot = quotaFromRecentSnapshots(connectionId, now);
+  if (fromSnapshot) {
+    registerQuotaWindows(provider, Object.keys(fromSnapshot.windows || {}));
+    cache.set(key, {
+      quota: fromSnapshot,
+      fetchedAt: now,
+      expiresAt: now + computeAdaptiveTtl(fromSnapshot, conn, now),
+    });
+    return fromSnapshot;
+  }
+
+  // Tier 3: no cache and no recent snapshot — fetch upstream ourselves.
   let usage: unknown;
   try {
     usage = await getUsageForProvider(conn as Parameters<typeof getUsageForProvider>[0]);
@@ -192,7 +312,7 @@ export const fetchGenericQuota: QuotaFetcher = async (connectionId, connection) 
   // modal inputs without waiting for the user to open the page.
   registerQuotaWindows(provider, Object.keys(quota.windows || {}));
 
-  cache.set(key, { quota, fetchedAt: Date.now() });
+  cache.set(key, { quota, fetchedAt: now, expiresAt: now + computeAdaptiveTtl(quota, conn, now) });
   return quota;
 };
 

@@ -36,13 +36,37 @@ function isPastResetWindow(resetAt: any): boolean {
   return Number.isFinite(resetTime) && Date.now() >= resetTime;
 }
 
-function getResetAdjustedQuota(quota: any) {
+const RESET_ROLLOVER_GRACE_MS = 10 * 60_000;
+
+/**
+ * A past `resetAt` means one of two things: the quota window genuinely rolled
+ * over (so the counter is about to zero and we optimistically show 100% until
+ * the next fetch confirms), OR the whole payload is stale and its reset time
+ * lapsed only because the data is old. The discriminator is the fetch age: a
+ * real rollover comes from a recent fetch whose reset just crossed `now`; a
+ * stale payload was fetched hours ago. Only treat it as a rollover when the
+ * fetch is recent — otherwise a 7h-old cache would wrongly render 100% left.
+ */
+function isGenuineResetRollover(resetAt: any, fetchedAt: any): boolean {
+  if (!isPastResetWindow(resetAt)) return false;
+  const fetched =
+    typeof fetchedAt === "number"
+      ? fetchedAt
+      : typeof fetchedAt === "string"
+        ? Date.parse(fetchedAt)
+        : NaN;
+  if (!Number.isFinite(fetched)) return false;
+  return Date.now() - fetched <= RESET_ROLLOVER_GRACE_MS;
+}
+
+function getResetAdjustedQuota(quota: any, fetchedAt?: any) {
   const usedRaw = Number(quota?.used || 0);
   const totalRaw = Number(quota?.total || 0);
   const total = Number.isFinite(totalRaw) ? totalRaw : 0;
   const remainingRaw = safePercentage(quota?.remainingPercentage);
   const hasPendingUsage = usedRaw > 0 || (remainingRaw !== undefined && remainingRaw < 100);
-  const staleAfterReset = isPastResetWindow(quota?.resetAt || null) && hasPendingUsage;
+  const staleAfterReset =
+    isGenuineResetRollover(quota?.resetAt || null, fetchedAt) && hasPendingUsage;
 
   return {
     staleAfterReset,
@@ -52,8 +76,8 @@ function getResetAdjustedQuota(quota: any) {
   };
 }
 
-function normalizeQuotaEntry(name: string, quota: any = {}, extras: any = {}) {
-  const adjusted = getResetAdjustedQuota(quota);
+function normalizeQuotaEntry(name: string, quota: any = {}, extras: any = {}, fetchedAt?: any) {
+  const adjusted = getResetAdjustedQuota(quota, fetchedAt);
   return {
     name,
     used: Number.isFinite(adjusted.used) ? adjusted.used : 0,
@@ -68,23 +92,30 @@ function normalizeQuotaEntry(name: string, quota: any = {}, extras: any = {}) {
 }
 
 function parseGeneric(data: any) {
-  return quotaEntries(data).map(([name, quota]) => normalizeQuotaEntry(name, quota));
+  return quotaEntries(data).map(([name, quota]) =>
+    normalizeQuotaEntry(name, quota, {}, data?.fetchedAt)
+  );
 }
 
 function parseGithub(data: any) {
   return quotaEntries(data)
     .filter(([, quota]) => !isUnlimitedEmpty(quota))
-    .map(([name, quota]) => normalizeQuotaEntry(name, quota));
+    .map(([name, quota]) => normalizeQuotaEntry(name, quota, {}, data?.fetchedAt));
 }
 
 function parseGlmFamily(data: any) {
   return quotaEntries(data).map(([name, quota]) =>
-    normalizeQuotaEntry(name, quota, {
-      displayName: quota?.displayName,
-      details: Array.isArray(quota?.details) ? quota.details : undefined,
-      isPercentageOnly:
-        Number(quota?.total || 0) === 100 && quota?.remainingPercentage !== undefined,
-    })
+    normalizeQuotaEntry(
+      name,
+      quota,
+      {
+        displayName: quota?.displayName,
+        details: Array.isArray(quota?.details) ? quota.details : undefined,
+        isPercentageOnly:
+          Number(quota?.total || 0) === 100 && quota?.remainingPercentage !== undefined,
+      },
+      data?.fetchedAt
+    )
   );
 }
 
@@ -108,23 +139,30 @@ function buildCreditsQuota(
   };
 }
 
-function parseAntigravityQuota(modelKey: string, quota: any) {
+function parseAntigravityQuota(modelKey: string, quota: any, fetchedAt?: any) {
   if (modelKey === "credits") {
     const remaining = Number(quota?.remaining ?? 0);
     return buildCreditsQuota("credits", remaining, remaining > 50 ? 100 : remaining > 10 ? 60 : 20);
   }
   if (modelKey === "models" || isUnlimitedEmpty(quota)) return null;
-  return normalizeQuotaEntry(modelKey, quota, {
+  return normalizeQuotaEntry(
     modelKey,
-    isPercentageOnly: quota?.fractionReported === true,
-    ...(quota?.quotaSource ? { quotaSource: quota.quotaSource } : {}),
-    ...(quota?.fractionReported !== undefined ? { fractionReported: quota.fractionReported } : {}),
-  });
+    quota,
+    {
+      modelKey,
+      isPercentageOnly: quota?.fractionReported === true,
+      ...(quota?.quotaSource ? { quotaSource: quota.quotaSource } : {}),
+      ...(quota?.fractionReported !== undefined
+        ? { fractionReported: quota.fractionReported }
+        : {}),
+    },
+    fetchedAt
+  );
 }
 
 function parseAntigravity(data: any) {
   return quotaEntries(data)
-    .map(([modelKey, quota]) => parseAntigravityQuota(modelKey, quota))
+    .map(([modelKey, quota]) => parseAntigravityQuota(modelKey, quota, data?.fetchedAt))
     .filter(Boolean);
 }
 
@@ -144,10 +182,15 @@ function buildBankedResetCreditsQuota(count: number) {
 
 function parseCodex(data: any) {
   const quotas = quotaEntries(data).map(([quotaType, quota]) =>
-    normalizeQuotaEntry(quotaType, quota, {
-      displayName: quota?.displayName,
-      isPercentageOnly: true,
-    })
+    normalizeQuotaEntry(
+      quotaType,
+      quota,
+      {
+        displayName: quota?.displayName,
+        isPercentageOnly: true,
+      },
+      data?.fetchedAt
+    )
   );
 
   const bankedResetCredits = Number(data?.bankedResetCredits);
@@ -183,7 +226,7 @@ function parseClaude(data: any) {
     return [{ name: "error", used: 0, total: 0, resetAt: null, message: data.message }];
 
   const quotas = quotaEntries(data).map(([name, quota]) =>
-    normalizeQuotaEntry(name, quota, { isPercentageOnly: true })
+    normalizeQuotaEntry(name, quota, { isPercentageOnly: true }, data?.fetchedAt)
   );
 
   if (data?.extraUsage?.is_enabled) {
@@ -193,9 +236,9 @@ function parseClaude(data: any) {
   return quotas;
 }
 
-function parseDeepseekQuota(quotaKey: string, quota: any) {
+function parseDeepseekQuota(quotaKey: string, quota: any, fetchedAt?: any) {
   const match = quotaKey.match(/^credits(?:_([a-z]{3}))?$/);
-  if (!match) return normalizeQuotaEntry(quotaKey, quota);
+  if (!match) return normalizeQuotaEntry(quotaKey, quota, {}, fetchedAt);
   const remaining = Number(quota?.remaining ?? 0);
   const currency = quota?.currency ?? (match[1] ? match[1].toUpperCase() : "USD");
   return buildCreditsQuota(currency, remaining, remaining > 20 ? 100 : remaining > 5 ? 60 : 20, {
@@ -204,7 +247,9 @@ function parseDeepseekQuota(quotaKey: string, quota: any) {
 }
 
 function parseDeepseek(data: any) {
-  return quotaEntries(data).map(([quotaKey, quota]) => parseDeepseekQuota(quotaKey, quota));
+  return quotaEntries(data).map(([quotaKey, quota]) =>
+    parseDeepseekQuota(quotaKey, quota, data?.fetchedAt)
+  );
 }
 
 function parseProviderQuotas(providerId: string, data: any) {
