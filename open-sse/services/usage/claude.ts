@@ -97,39 +97,78 @@ export async function getClaudeUsage(accessToken?: string) {
       const hasUtilization = (window: JsonRecord) =>
         window && typeof window === "object" && safePercentage(window.utilization) !== undefined;
 
-      const createQuotaObject = (window: JsonRecord) => {
-        const used = safePercentage(window.utilization) as number; // utilization = % used
+      const buildPercentageQuota = (usedPercent: number, resetValue: unknown): UsageQuota => {
+        const used = Math.min(Math.max(0, usedPercent), 100);
         const remaining = Math.max(0, 100 - used);
         return {
           used,
           total: 100,
           remaining,
-          resetAt: parseResetTime(window.resets_at),
+          resetAt: parseResetTime(resetValue),
           remainingPercentage: remaining,
           unlimited: false,
         };
       };
 
-      const fiveHour = toRecord(data.five_hour);
-      if (hasUtilization(fiveHour)) {
-        quotas["session (5h)"] = createQuotaObject(fiveHour);
-      }
-
-      const sevenDay = toRecord(data.seven_day);
-      if (hasUtilization(sevenDay)) {
-        quotas["weekly (7d)"] = createQuotaObject(sevenDay);
-      }
+      const createQuotaObject = (window: JsonRecord) =>
+        buildPercentageQuota(safePercentage(window.utilization) as number, window.resets_at);
 
       // Map Anthropic's internal codenames (e.g., omelette → Designer) for display.
       const MODEL_DISPLAY_NAMES: Record<string, string> = {
         omelette: "designer",
       };
+
+      // ── New format (Anthropic changed /api/oauth/usage ~2026-07-02) ──────────
+      // The flat five_hour/seven_day fields are now null on current accounts; the
+      // rolling routing windows arrive in a generic `limits[]` array instead. Each
+      // entry is self-describing:
+      //   { kind: "session" | "weekly_all" | "weekly_scoped",
+      //     percent: <0–100 % used>, resets_at: <ISO>,
+      //     scope?: { model?: { display_name?: string } },   // e.g. "Fable"
+      //     is_active?: boolean }
+      // Only the account-wide windows (session, weekly_all) belong in routing
+      // `quotas`. `is_active` is NOT a visibility flag — Anthropic marks non-binding
+      // windows `is_active:false` while still populating a real percentage, so we key
+      // off `percent`. Per-model `weekly_scoped` buckets (Fable, …) are display-only
+      // and are surfaced separately via `modelQuotas` below — they must never enter
+      // account-wide routing quotas.
+      const limits = Array.isArray(data.limits) ? data.limits : [];
+      for (const entry of limits) {
+        const record = toRecord(entry);
+        const rawPercent = record.percent ?? record.utilization;
+        const usedPercent = safePercentage(rawPercent);
+        if (usedPercent === undefined) continue;
+
+        const kind = typeof record.kind === "string" ? record.kind : "";
+        if (kind === "session") {
+          quotas["session (5h)"] = buildPercentageQuota(usedPercent, record.resets_at);
+        } else if (kind === "weekly_all") {
+          quotas["weekly (7d)"] = buildPercentageQuota(usedPercent, record.resets_at);
+        }
+      }
+
+      // ── Legacy flat fields (older account cohorts) ──────────────────────────
+      // Only backfill windows the new `limits[]` array didn't already populate, so
+      // a mixed payload never overwrites authoritative new-format data.
+      const fiveHour = toRecord(data.five_hour);
+      if (!quotas["session (5h)"] && hasUtilization(fiveHour)) {
+        quotas["session (5h)"] = createQuotaObject(fiveHour);
+      }
+
+      const sevenDay = toRecord(data.seven_day);
+      if (!quotas["weekly (7d)"] && hasUtilization(sevenDay)) {
+        quotas["weekly (7d)"] = createQuotaObject(sevenDay);
+      }
+
       for (const [key, value] of Object.entries(data)) {
         const valueRecord = toRecord(value);
         if (key.startsWith("seven_day_") && key !== "seven_day" && hasUtilization(valueRecord)) {
           const codename = key.replace("seven_day_", "");
           const modelName = MODEL_DISPLAY_NAMES[codename] || codename;
-          quotas[`weekly ${modelName} (7d)`] = createQuotaObject(valueRecord);
+          const quotaKey = `weekly ${modelName} (7d)`;
+          if (!quotas[quotaKey]) {
+            quotas[quotaKey] = createQuotaObject(valueRecord);
+          }
         }
       }
 
