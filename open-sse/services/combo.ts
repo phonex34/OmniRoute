@@ -75,6 +75,13 @@ import { phaseComboSetup } from "./combo/comboSetup.ts";
 import { checkCredentialGate, logCredentialSkip } from "./credentialGate.ts";
 import { emit } from "../../src/lib/events/eventBus";
 import { notifyWebhookEvent } from "../../src/lib/webhookDispatcher";
+import { recordFailureForNotify } from "../../src/lib/webhooks/failureNotificationDedup";
+import { shouldNotifyTierDrop } from "../../src/lib/webhooks/comboTierDropDedup";
+import { classifyTier } from "./tierResolver.ts";
+import { parseAutoPrefix } from "./autoCombo/autoPrefix.ts";
+import { resolveAutoStrategyOrder } from "./combo/resolveAutoStrategy.ts";
+import { applyStrategyOrdering } from "./combo/applyStrategyOrdering.ts";
+import { handlePipelineCombo, buildPipelineResponse } from "./autoCombo/pipelineRouter.ts";
 import { type ProviderCandidate } from "./autoCombo/scoring.ts";
 import { estimateTokens } from "./contextManager.ts";
 import { getSessionConnection } from "./sessionManager.ts";
@@ -327,6 +334,40 @@ export function releaseStickyPinOnFailure(
   if (!messageHash || !failedConnectionId) return;
   if (peekStickyConnectionId(messageHash) !== failedConnectionId) return;
   clearStickyBinding(messageHash);
+}
+
+// Fire a request.failed webhook for a combo that exhausted all targets with a
+// real upstream error status (429/5xx). Deduplicated per (combo, provider,
+// status) so a provider failing on every request doesn't flood the channel —
+// see failureNotificationDedup. Best-effort: never throws into the hot path.
+function emitComboFailedWebhook(
+  status: number,
+  errorMsg: string,
+  latencyMs: number,
+  fallbackCount: number,
+  targets: Array<{ provider?: string; modelStr?: string }>,
+  comboName: string
+): void {
+  try {
+    const first = targets[0];
+    const provider =
+      first?.provider || (first?.modelStr ? parseModel(first.modelStr).provider : "") || "unknown";
+    const model = first?.modelStr || "";
+    const { shouldNotify, count } = recordFailureForNotify(comboName, provider, status);
+    if (!shouldNotify) return;
+    notifyWebhookEvent("request.failed", {
+      combo: comboName,
+      provider,
+      model,
+      status,
+      error: errorMsg,
+      latencyMs,
+      fallbackCount,
+      failureCount: count,
+    });
+  } catch {
+    /* webhook is best-effort */
+  }
 }
 
 const DEFAULT_MODEL_P95_MS: Record<string, number> = {
@@ -1757,6 +1798,41 @@ async function handleComboChatInner({
             if (effectiveSessionId) {
               clearComboFailureTracking(effectiveSessionId, combo.name);
             }
+
+            // Tier-drop webhook: signal ONCE when a combo whose front target is
+            // premium (Claude/Codex/GPT-class) is now being served by a
+            // lower-tier target — i.e. the premium tier ran out and traffic fell
+            // through. Edge-triggered (see comboTierDropDedup) so a sustained
+            // drop produces one webhook, not one per request. Best-effort.
+            try {
+              const front = orderedTargets[0];
+              const frontTier = front
+                ? classifyTier(
+                    front.provider || parseModel(front.modelStr).provider || "unknown",
+                    parseModel(front.modelStr).model || front.modelStr
+                  ).tier
+                : null;
+              const servedTier = classifyTier(
+                provider,
+                parseModel(modelStr).model || modelStr
+              ).tier;
+              const isPremium = servedTier === "premium";
+              if (frontTier === "premium" && shouldNotifyTierDrop(combo.name, isPremium)) {
+                notifyWebhookEvent("combo.switched", {
+                  combo: combo.name,
+                  fromProvider: front?.provider || parseModel(front?.modelStr ?? "").provider || "",
+                  fromTier: frontTier,
+                  toProvider: provider,
+                  toModel: modelStr,
+                  toTier: servedTier,
+                  fallbackCount,
+                  reason: "front-tier-exhausted",
+                });
+              }
+            } catch {
+              /* tier-drop webhook is best-effort */
+            }
+
             // Context cache pinning: record model usage for session-based pinning
             // (independent of universal handoff — always fires when context_cache_protection is on)
             // #3825: write under the SAME effectiveSessionId used by the read site so a
@@ -2617,12 +2693,26 @@ async function handleComboChatInner({
             observedFailure ? allObservedFailuresQuota : null
           );
         }
-        notifyWebhookEvent("request.failed", {
-          combo: combo.name,
-          reason: "ALL_ACCOUNTS_INACTIVE",
-          latencyMs,
-          fallbackCount,
-        });
+        // Deduped like the other request.failed sites so an inactive-accounts
+        // combo under heavy traffic doesn't flood the channel.
+        const { shouldNotify, count } = recordFailureForNotify(
+          combo.name,
+          "(inactive)",
+          "ALL_ACCOUNTS_INACTIVE"
+        );
+        if (shouldNotify) {
+          notifyWebhookEvent("request.failed", {
+            combo: combo.name,
+            reason: "ALL_ACCOUNTS_INACTIVE",
+            status: 503,
+            latencyMs,
+            fallbackCount,
+            failureCount: count,
+          });
+        }
+        // Silent-stop fix: bump the failure counter so the session pin clears on the 3rd
+        // consecutive all-inactive cascade; buildRecoveryHint emits `switch-combo` with a
+        // next-step that points the user at /dashboard/providers.
         recordComboFailure(effectiveSessionId, combo.name);
         return errorResponseWithComboDiagnostics(
           503,
@@ -2709,6 +2799,7 @@ async function handleComboChatInner({
       if (earliestRetryAfter && isRetryAfterEligibleStatus(status)) {
         const retryHuman = formatRetryAfter(toRetryAfterDisplayValue(earliestRetryAfter));
         log.warn("COMBO", `All models failed | ${msg} (${retryHuman})`);
+        emitComboFailedWebhook(status, msg, latencyMs, fallbackCount, orderedTargets, combo.name);
         return withQuotaExhaustionClassification(
           unavailableResponse(status, msg, earliestRetryAfter, retryHuman),
           observedFailure ? allObservedFailuresQuota : null
@@ -2720,6 +2811,7 @@ async function handleComboChatInner({
       // model: auto" instead of an opaque 5xx. We pass the upstream retry-after seconds to
       // the hint so the client can render a precise "wait Ns and retry" message.
       log.warn("COMBO", `All models failed | ${msg}`);
+      emitComboFailedWebhook(status, msg, latencyMs, fallbackCount, orderedTargets, combo.name);
       const { pinClearedNow } = recordComboFailure(effectiveSessionId, combo.name);
       if (pinClearedNow) {
         log.info(
