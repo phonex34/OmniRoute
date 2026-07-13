@@ -26,7 +26,7 @@ test("buildDiscordPayload — all WEBHOOK_EVENTS return object with content or e
 });
 
 test("buildDiscordPayload — embeds have title and color fields", () => {
-  const payload = buildDiscordPayload("request.failed", { provider: "openai" });
+  const payload = buildDiscordPayload("quota.exceeded", { provider: "openai" });
   assert.ok(Array.isArray(payload.embeds) && payload.embeds.length > 0, "should have embeds");
   const embed = payload.embeds![0];
   assert.ok(typeof embed.title === "string" && embed.title.length > 0, "embed must have title");

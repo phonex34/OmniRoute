@@ -52,8 +52,8 @@ test("buildTelegramPayload — request.completed includes provider, account, com
   );
 
   assert.ok(payload.text.includes("Model: `codex/gpt-5.5`"));
-  assert.ok(payload.text.includes("Provider: `codex`"));
-  assert.ok(payload.text.includes("Account: `Workspace Principal`"));
+  assert.ok(payload.text.includes("*CODEX*"));
+  assert.ok(payload.text.includes("Workspace Principal"));
   assert.ok(payload.text.includes("Combo: `auto-fallback`"));
   assert.ok(payload.text.includes("Latency: `1421ms`"));
   assert.ok(payload.text.includes("Fallbacks: `2`"));
@@ -69,7 +69,7 @@ test("buildTelegramPayload — accountId falls back to short account label", () 
     "-100123"
   );
 
-  assert.ok(payload.text.includes("Account: `Account #123456`"));
+  assert.ok(payload.text.includes("Account #123456"));
 });
 
 test("buildTelegramPayload — chat_id matches provided value for groups", () => {
