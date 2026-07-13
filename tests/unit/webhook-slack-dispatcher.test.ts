@@ -32,13 +32,13 @@ test("buildSlackPayload — test.ping produces a ping/test message", () => {
 });
 
 test("buildSlackPayload — request.failed includes provider context", () => {
-  const payload = buildSlackPayload("request.failed", { provider: "openai" });
+  const payload = buildSlackPayload("request.failed", { provider: "openai", model: "gpt-4" });
   const combined = JSON.stringify(payload);
   assert.ok(
     combined.includes("Provider") ||
       combined.includes("provider") ||
       combined.includes("error") ||
-      combined.includes("⚠️"),
+      combined.includes("🚨"),
     "should reference provider/error"
   );
 });
