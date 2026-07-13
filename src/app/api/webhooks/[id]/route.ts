@@ -23,6 +23,7 @@ const WEBHOOK_EVENT_VALUES = [
   "provider.error",
   "provider.recovered",
   "quota.exceeded",
+  "usage.report",
   "combo.switched",
   "test.ping",
 ] as const;

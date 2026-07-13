@@ -44,7 +44,9 @@ interface WebhookCardProps {
   webhook: WebhookItem;
   t: (key: string, opts?: Record<string, unknown>) => string;
   testingId: string | null;
+  sendingUsageId?: string | null;
   onTest: (wh: WebhookItem) => void;
+  onSendUsage?: (wh: WebhookItem) => void;
   onToggleEnabled: (wh: WebhookItem) => void;
   onEdit: (wh: WebhookItem) => void;
   onDelete: (wh: WebhookItem) => void;
@@ -54,7 +56,9 @@ export function WebhookCard({
   webhook,
   t,
   testingId,
+  sendingUsageId,
   onTest,
+  onSendUsage,
   onToggleEnabled,
   onEdit,
   onDelete,
@@ -62,6 +66,7 @@ export function WebhookCard({
   const [expanded, setExpanded] = useState(false);
   const status = getStatus(webhook);
   const isTesting = testingId === webhook.id;
+  const isSendingUsage = sendingUsageId === webhook.id;
 
   return (
     <div className="rounded-xl border border-border bg-surface transition-shadow hover:shadow-sm">
@@ -102,6 +107,21 @@ export function WebhookCard({
               {isTesting ? "sync" : "send"}
             </span>
           </button>
+          {onSendUsage && (
+            <button
+              type="button"
+              onClick={() => onSendUsage(webhook)}
+              disabled={isSendingUsage}
+              title={t("sendUsage")}
+              className="rounded-lg p-2 text-text-muted transition-colors hover:bg-primary/10 hover:text-primary disabled:opacity-40"
+            >
+              <span
+                className={`material-symbols-outlined text-[18px] ${isSendingUsage ? "animate-spin" : ""}`}
+              >
+                {isSendingUsage ? "sync" : "monitoring"}
+              </span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onToggleEnabled(webhook)}
