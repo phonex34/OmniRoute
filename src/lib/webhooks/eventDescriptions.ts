@@ -4,6 +4,7 @@ export type WebhookEvent =
   | "provider.error"
   | "provider.recovered"
   | "quota.exceeded"
+  | "usage.report"
   | "combo.switched"
   | "test.ping";
 
@@ -56,15 +57,61 @@ export const EVENT_DESCRIPTIONS: Record<WebhookEvent, EventDescription> = {
     description: "A usage threshold (e.g. 95% of quota) was reached.",
     exampleData: { quota: "daily_tokens", used: 950000, limit: 1000000, pct: 95 },
   },
+  "usage.report": {
+    label: "Usage Report",
+    emoji: "📈",
+    description:
+      "Periodic OAuth quota summary, emitted by the background provider-limits sync (~every 70 min).",
+    exampleData: {
+      intervalMinutes: 70,
+      accountCount: 2,
+      accounts: [
+        {
+          provider: "codex",
+          account: "me@example.com",
+          worstRemainingPct: 18,
+          windows: [
+            {
+              name: "weekly",
+              displayName: "Weekly",
+              remainingPct: 18,
+              resetAt: "2026-05-21T00:00:00Z",
+              unlimited: false,
+            },
+            {
+              name: "session",
+              displayName: "Session",
+              remainingPct: 74,
+              resetAt: "2026-05-14T20:00:00Z",
+              unlimited: false,
+            },
+          ],
+        },
+        {
+          provider: "claude",
+          account: "team@example.com",
+          worstRemainingPct: 88,
+          windows: [
+            { name: "session", displayName: "Session", remainingPct: 88, unlimited: false },
+          ],
+        },
+      ],
+    },
+  },
   "combo.switched": {
     label: "Combo Switched",
     emoji: "🔄",
-    description: "Combo routing switched to a different target.",
+    description:
+      "A combo dropped off its premium front tier (e.g. Codex/Claude exhausted) and is now served by a lower tier. Sent once per drop, re-armed when the premium tier recovers.",
     exampleData: {
-      combo: "auto-fallback",
-      fromModel: "gpt-4o",
-      toModel: "claude-opus-4-7",
-      reason: "provider.error",
+      combo: "always-on",
+      fromProvider: "codex",
+      fromTier: "premium",
+      toProvider: "glm",
+      toModel: "glm/glm-5.1",
+      toTier: "cheap",
+      fallbackCount: 2,
+      reason: "front-tier-exhausted",
     },
   },
   "test.ping": {
