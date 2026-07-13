@@ -196,6 +196,16 @@ export function isQuotaPreflightEnabled(connection: Record<string, unknown>): bo
   return psd?.quotaPreflightEnabled === true;
 }
 
+export interface QuotaWarnInfo {
+  window: string | null;
+  remainingPercent: number;
+  used: number;
+  total: number;
+  resetAt: string | null;
+}
+
+export type QuotaWarnCallback = (info: QuotaWarnInfo) => void;
+
 export interface PreflightQuotaThresholds {
   /**
    * Resolve the minimum-remaining cutoff (0-100 integer) for a given window
@@ -567,8 +577,10 @@ export function resolveDynamicQuotaFetcher(
 /** Warn for each live window whose remaining quota is at or below its warn threshold. */
 function warnApproachingWindowCutoffs(
   label: string,
+  quota: QuotaInfo,
   windows: NonNullable<QuotaInfo["windows"]>,
-  thresholds?: PreflightQuotaThresholds
+  thresholds?: PreflightQuotaThresholds,
+  onWarn?: QuotaWarnCallback
 ): void {
   for (const [windowName, windowInfo] of Object.entries(windows)) {
     // A window whose reset already passed is stale: it no longer approaches any cutoff.
@@ -583,6 +595,13 @@ function warnApproachingWindowCutoffs(
       console.warn(
         `[QuotaPreflight] ${label} ${windowName}: ${remainingPercent.toFixed(1)}% remaining — approaching cutoff`
       );
+      onWarn?.({
+        window: windowName,
+        remainingPercent,
+        used: quota.used,
+        total: quota.total,
+        resetAt: windowInfo.resetAt ?? null,
+      });
     }
   }
 }
@@ -591,7 +610,8 @@ export async function preflightQuota(
   provider: string,
   connectionId: string,
   connection: Record<string, unknown>,
-  thresholds?: PreflightQuotaThresholds
+  thresholds?: PreflightQuotaThresholds,
+  onWarn?: QuotaWarnCallback
 ): Promise<PreflightQuotaResult> {
   const requestedModel =
     typeof connection.requestedModel === "string" ? connection.requestedModel : null;
@@ -628,8 +648,10 @@ export async function preflightQuota(
   if (windows && Object.keys(windows).length > 0) {
     warnApproachingWindowCutoffs(
       `${provider}/${connectionId}`,
+      quota,
       windowsForScope(windows, scope),
-      thresholds
+      thresholds,
+      onWarn
     );
   }
 
@@ -664,6 +686,13 @@ export async function preflightQuota(
       console.warn(
         `[QuotaPreflight] ${provider}/${connectionId}: ${remainingPercent.toFixed(1)}% remaining — approaching cutoff`
       );
+      onWarn?.({
+        window: null,
+        remainingPercent,
+        used: quota.used,
+        total: quota.total,
+        resetAt: quota.resetAt ?? null,
+      });
     }
   }
 
