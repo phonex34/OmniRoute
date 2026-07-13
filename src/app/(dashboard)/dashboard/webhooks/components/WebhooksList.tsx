@@ -6,8 +6,10 @@ interface WebhooksListProps {
   webhooks: WebhookItem[];
   loading: boolean;
   testingId: string | null;
+  sendingUsageId?: string | null;
   t: (key: string, opts?: Record<string, unknown>) => string;
   onTest: (wh: WebhookItem) => void;
+  onSendUsage?: (wh: WebhookItem) => void;
   onToggleEnabled: (wh: WebhookItem) => void;
   onEdit: (wh: WebhookItem) => void;
   onDelete: (wh: WebhookItem) => void;
@@ -17,8 +19,10 @@ export function WebhooksList({
   webhooks,
   loading,
   testingId,
+  sendingUsageId,
   t,
   onTest,
+  onSendUsage,
   onToggleEnabled,
   onEdit,
   onDelete,
@@ -44,7 +48,9 @@ export function WebhooksList({
           webhook={wh}
           t={t}
           testingId={testingId}
+          sendingUsageId={sendingUsageId}
           onTest={onTest}
+          onSendUsage={onSendUsage}
           onToggleEnabled={onToggleEnabled}
           onEdit={onEdit}
           onDelete={onDelete}
