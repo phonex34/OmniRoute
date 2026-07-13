@@ -98,6 +98,16 @@ export function isQuotaPreflightEnabled(connection: Record<string, unknown>): bo
   return psd?.quotaPreflightEnabled === true;
 }
 
+export interface QuotaWarnInfo {
+  window: string | null;
+  remainingPercent: number;
+  used: number;
+  total: number;
+  resetAt: string | null;
+}
+
+export type QuotaWarnCallback = (info: QuotaWarnInfo) => void;
+
 export interface PreflightQuotaThresholds {
   /**
    * Resolve the minimum-remaining cutoff (0-100 integer) for a given window
@@ -235,7 +245,8 @@ export async function preflightQuota(
   provider: string,
   connectionId: string,
   connection: Record<string, unknown>,
-  thresholds?: PreflightQuotaThresholds
+  thresholds?: PreflightQuotaThresholds,
+  onWarn?: QuotaWarnCallback
 ): Promise<PreflightQuotaResult> {
   // No legacy enable-flag gate here — the caller decides when to invoke us
   // (see file-level docstring). When there's no fetcher we proceed silently.
@@ -293,6 +304,13 @@ export async function preflightQuota(
         console.warn(
           `[QuotaPreflight] ${provider}/${connectionId} ${windowName}: ${remainingPercent.toFixed(1)}% remaining — approaching cutoff`
         );
+        onWarn?.({
+          window: windowName,
+          remainingPercent,
+          used: quota.used,
+          total: quota.total,
+          resetAt: windowInfo.resetAt ?? null,
+        });
       }
     }
 
@@ -343,6 +361,13 @@ export async function preflightQuota(
     console.warn(
       `[QuotaPreflight] ${provider}/${connectionId}: ${remainingPercent.toFixed(1)}% remaining — approaching cutoff`
     );
+    onWarn?.({
+      window: null,
+      remainingPercent,
+      used: quota.used,
+      total: quota.total,
+      resetAt: quota.resetAt ?? null,
+    });
   }
 
   return { proceed: true, quotaPercent: percentUsed };
