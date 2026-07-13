@@ -7,10 +7,12 @@ import { readFileSync } from "node:fs";
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-snapshot-persist-"));
 
-const { snapshotCacheEntry } = await import("../../src/lib/usage/providerLimits.ts");
 const { setProviderLimitsCache, getProviderLimitsCache } =
   await import("../../src/lib/db/providerLimits.ts");
 const { saveQuotaSnapshot } = await import("../../src/lib/db/quotaSnapshots.ts");
+const { snapshotCacheEntry, syncAllProviderLimits } =
+  await import("../../src/lib/usage/providerLimits.ts");
+const providersDb = await import("../../src/lib/db/providers.ts");
 
 const CONN = "snapshot-persist-conn-1";
 
@@ -120,5 +122,70 @@ test("both fetch-failure fallback paths persist a fresh snapshot back to key_val
     source,
     /if \(snapshot\) \{\s*cacheEntries\.push\(\{ connectionId, entry: snapshot \}\);/,
     "bulk fallback must batch a fresh snapshot for key_value persistence"
+  );
+});
+
+test("syncAllProviderLimits (batch/Refresh-All) persists a fresher snapshot instead of re-pushing a stale mergeProviderLimitsCacheEntry(previous) result", async () => {
+  const connection = await providersDb.createProviderConnection({
+    provider: "codex",
+    authType: "oauth",
+    name: `Codex Batch Snapshot ${Date.now()}`,
+    accessToken: "codex-batch-snapshot-access-token",
+    refreshToken: "codex-batch-snapshot-refresh-token",
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  });
+  const connectionId = (connection as { id: string }).id;
+
+  // Prior key_value entry: usable (has quotas), frozen at an old timestamp —
+  // mergeProviderLimitsCacheEntry's hasUsableCachedData() gate will treat this
+  // as "keep serving it" on a failed fetch, returning it BY IDENTITY.
+  setProviderLimitsCache(connectionId, {
+    quotas: { "session (5h)": { used: 46, total: 100, remainingPercentage: 54 } },
+    plan: "pro",
+    message: null,
+    fetchedAt: "2026-07-08T08:55:00.000Z",
+    source: "scheduled",
+  });
+
+  // A newer quota_snapshots row exists (background writer advanced since the
+  // key_value entry froze) — this is what the fallback should pick up.
+  saveQuotaSnapshot({
+    provider: "codex",
+    connection_id: connectionId,
+    window_key: "session (5h)",
+    remaining_percentage: 33,
+    is_exhausted: 0,
+    next_reset_at: "2026-07-08T11:30:00.000Z",
+    window_duration_ms: null,
+    raw_data: null,
+  });
+
+  const previousFetch = globalThis.fetch;
+  // 401 → Codex's fetcher returns { message: "..." } with no `quotas`, no
+  // throw. mergeProviderLimitsCacheEntry then sees hasUsableCachedData(prior)
+  // === true and returns `previous` BY IDENTITY (cache === previous), NOT a
+  // `{ quotas: undefined, message }` shape — this is the case the plain
+  // `!cache.quotas && cache.message` guard misses.
+  globalThis.fetch = (async () =>
+    new Response("unauthorized", { status: 401 })) as typeof fetch;
+  try {
+    await syncAllProviderLimits({ source: "manual" });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+
+  const persisted = getProviderLimitsCache(connectionId);
+  assert.ok(persisted, "a cache entry must still exist after the batch sync");
+  assert.equal(
+    (persisted!.quotas as Record<string, { remainingPercentage: number }>)["session (5h)"]
+      .remainingPercentage,
+    33,
+    "key_value must be upgraded to the fresher quota_snapshots percentage (33), " +
+      "not left frozen at the stale 54 — proves cache === previous is detected " +
+      "and the snapshot fallback runs instead of re-pushing the stale merged entry"
+  );
+  assert.ok(
+    Date.parse(persisted!.fetchedAt) > Date.parse("2026-07-08T08:55:00.000Z"),
+    "persisted fetchedAt must advance past the frozen key_value timestamp"
   );
 });
