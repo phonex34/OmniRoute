@@ -45,6 +45,8 @@ import { runPluginOnResponseHook, runPluginOnStreamCompleteHook } from "./plugin
 import { wrapReadableStreamWithFinalize } from "./streamFinalize.ts";
 import { buildStreamLedgerDetails, recordStreamingCost } from "./streamingCost.ts";
 import { assembleStreamingPipeline, resolvePiiGate } from "./streamingPipeline.ts";
+import { codexOpaqueResponsesReplayStore } from "../../services/codexOpaqueResponsesReplayStore.ts";
+import type { CodexOpaqueResponsesReplayContext } from "./codexOpaqueResponsesReplayCapture.ts";
 import { scheduleStreamingQuotaShareConsumption } from "./streamingQuotaShare.ts";
 import { assembleStreamingResponseHeaders } from "./streamingResponseHeaders.ts";
 import { storeStreamingSemanticCacheResponse } from "./streamingSemanticCacheStore.ts";
@@ -63,7 +65,7 @@ import { calculateCost, calculateCostDetailed } from "@/lib/usage/costCalculator
 import { appendRequestLog, trackPendingRequest } from "@/lib/usageDb";
 import { isRegisteredFeatureFlagEnabled } from "../../utils/registeredFeatureFlag.ts";
 import { isEmptyStreamSiblingRecoveryEnabled } from "../../services/streamRecovery.ts";
-import { getProviderCredentials } from "@/sse/services/auth";
+import { extractSessionAffinityKey, getProviderCredentials } from "@/sse/services/auth";
 import { resolveCredentialGate } from "@/lib/streamingCredentialTransform";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- deps bag mirrors the barrel closure
@@ -124,6 +126,7 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
     memorySettings,
     model,
     modelInfo,
+    nativeCodexPassthrough,
     onRequestSuccess,
     onStreamFailure,
     pendingConnId,
@@ -816,6 +819,19 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
     body: deps.body,
     headers: deps.clientRawRequest?.headers,
   });
+  const codexOpaqueResponsesReplay: CodexOpaqueResponsesReplayContext | undefined =
+    provider === "codex" && targetFormat === FORMATS.OPENAI_RESPONSES && !nativeCodexPassthrough
+      ? (() => {
+          const sessionId = extractSessionAffinityKey(body, clientRawRequest?.headers);
+          return sessionId && !sessionId.startsWith("input:sha256:") && effectiveModel
+            ? {
+                model: effectiveModel,
+                sessionId,
+                store: (value) => codexOpaqueResponsesReplayStore.appendTurn(value),
+              }
+            : undefined;
+        })()
+      : undefined;
   const finalStream = assembleStreamingPipeline({
     providerResponse,
     transformStream,
@@ -842,6 +858,7 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
       model,
       credentials
     ),
+    codexOpaqueResponsesReplay,
   });
   const clientFacingStream = wrapReadableStreamWithFinalize(finalStream, releaseTurnExecution);
 
