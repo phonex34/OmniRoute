@@ -45,6 +45,8 @@ import { routingFinishReason } from "./routingFinishReason.ts";
 import { wrapReadableStreamWithFinalize } from "./streamFinalize.ts";
 import { buildStreamLedgerDetails, recordStreamingCost } from "./streamingCost.ts";
 import { assembleStreamingPipeline } from "./streamingPipeline.ts";
+import { codexOpaqueResponsesReplayStore } from "../../services/codexOpaqueResponsesReplayStore.ts";
+import type { CodexOpaqueResponsesReplayContext } from "./codexOpaqueResponsesReplayCapture.ts";
 import { scheduleStreamingQuotaShareConsumption } from "./streamingQuotaShare.ts";
 import { assembleStreamingResponseHeaders } from "./streamingResponseHeaders.ts";
 import { storeStreamingSemanticCacheResponse } from "./streamingSemanticCacheStore.ts";
@@ -57,7 +59,7 @@ import { extractFacts } from "@/lib/memory/extraction";
 import { calculateCost } from "@/lib/usage/costCalculator";
 import { appendRequestLog, trackPendingRequest } from "@/lib/usageDb";
 import { isFeatureFlagEnabled } from "@/shared/utils/featureFlags.ts";
-import { getProviderCredentials } from "@/sse/services/auth";
+import { extractSessionAffinityKey, getProviderCredentials } from "@/sse/services/auth";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- deps bag mirrors the barrel closure
 type Loose = any;
@@ -102,6 +104,7 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
     memorySettings,
     model,
     modelInfo,
+    nativeCodexPassthrough,
     onRequestSuccess,
     onStreamFailure,
     pendingConnId,
@@ -714,6 +717,19 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
     );
   }
 
+  const codexOpaqueResponsesReplay: CodexOpaqueResponsesReplayContext | undefined =
+    provider === "codex" && targetFormat === FORMATS.OPENAI_RESPONSES && !nativeCodexPassthrough
+      ? (() => {
+          const sessionId = extractSessionAffinityKey(body, clientRawRequest?.headers);
+          return sessionId && !sessionId.startsWith("input:sha256:") && effectiveModel
+            ? {
+                model: effectiveModel,
+                sessionId,
+                store: (value) => codexOpaqueResponsesReplayStore.appendTurn(value),
+              }
+            : undefined;
+        })()
+      : undefined;
   const finalStream = assembleStreamingPipeline({
     providerResponse,
     transformStream,
@@ -728,6 +744,7 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
     // that same patience for their first REAL content, not just their first
     // lifecycle frame. See pipeWithDisconnect's own doc comment.
     contentStallTimeoutMs: streamReadinessPolicy.timeoutMs,
+    codexOpaqueResponsesReplay,
   });
   const clientFacingStream = wrapReadableStreamWithFinalize(finalStream, releaseTurnExecution);
 
