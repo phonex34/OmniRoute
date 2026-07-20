@@ -283,6 +283,7 @@ import {
   type EffectiveServiceTier,
 } from "./chatCore/serviceTier.ts";
 import { cacheReasoningFromAssistantMessage } from "../services/reasoningCache.ts";
+import { codexOpaqueResponsesReplayStore } from "../services/codexOpaqueResponsesReplayStore.ts";
 import { sanitizeOpenAITool } from "../services/toolSchemaSanitizer.ts";
 import { isCompactResponsesEndpoint } from "../executors/codex.ts";
 import { buildCodexQuotaPersistence } from "./chatCore/codexQuota.ts";
@@ -5002,6 +5003,19 @@ export async function handleChatCore({
     );
   }
 
+  const codexOpaqueResponsesReplay =
+    provider === "codex" && targetFormat === FORMATS.OPENAI_RESPONSES && !nativeCodexPassthrough
+      ? (() => {
+          const sessionId = extractSessionAffinityKey(body, clientRawRequest?.headers);
+          return sessionId && !sessionId.startsWith("input:sha256:") && effectiveModel
+            ? {
+                model: effectiveModel,
+                sessionId,
+                store: (value) => codexOpaqueResponsesReplayStore.appendTurn(value),
+              }
+            : undefined;
+        })()
+      : undefined;
   const finalStream = assembleStreamingPipeline({
     providerResponse,
     transformStream,
@@ -5011,6 +5025,7 @@ export async function handleChatCore({
     clientResponseFormat,
     echoModel,
     responseHeaders,
+    codexOpaqueResponsesReplay,
   });
 
   // ── Gamification event (fire-and-forget) ──
