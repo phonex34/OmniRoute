@@ -245,6 +245,7 @@ import {
   type EffectiveServiceTier,
 } from "./chatCore/serviceTier.ts";
 import { cacheReasoningFromAssistantMessage } from "../services/reasoningCache.ts";
+import { codexOpaqueResponsesReplayStore } from "../services/codexOpaqueResponsesReplayStore.ts";
 import { sanitizeOpenAITool } from "../services/toolSchemaSanitizer.ts";
 import {
   setDetectedToolLimit,
@@ -3350,7 +3351,13 @@ export async function handleChatCore({
           // otherwise degenerate into a 429 rate-limit storm). Connection stays
           // active since only the specific model is unavailable. (#6827)
           const notFoundCooldownMs = COOLDOWN_MS.notFound;
-          lockModel(provider, errorConnectionId, currentModel, "model_not_found", notFoundCooldownMs);
+          lockModel(
+            provider,
+            errorConnectionId,
+            currentModel,
+            "model_not_found",
+            notFoundCooldownMs
+          );
           console.warn(
             `[provider] Node ${errorConnectionId} model not found (${statusCode}) for ${currentModel} - locking model for ${Math.ceil(notFoundCooldownMs / 1000)}s (connection stays active)`
           );
@@ -4477,6 +4484,19 @@ export async function handleChatCore({
     );
   }
 
+  const codexOpaqueResponsesReplay =
+    provider === "codex" && targetFormat === FORMATS.OPENAI_RESPONSES && !nativeCodexPassthrough
+      ? (() => {
+          const sessionId = extractSessionAffinityKey(body, clientRawRequest?.headers);
+          return sessionId && !sessionId.startsWith("input:sha256:") && effectiveModel
+            ? {
+                model: effectiveModel,
+                sessionId,
+                store: (value) => codexOpaqueResponsesReplayStore.appendTurn(value),
+              }
+            : undefined;
+        })()
+      : undefined;
   const finalStream = assembleStreamingPipeline({
     providerResponse,
     transformStream,
@@ -4486,6 +4506,7 @@ export async function handleChatCore({
     clientResponseFormat,
     echoModel,
     responseHeaders,
+    codexOpaqueResponsesReplay,
   });
 
   // ── Gamification event (fire-and-forget) ──

@@ -23,8 +23,13 @@ import { createPiiSseTransform as defaultPiiSse } from "@/lib/streamingPiiTransf
 import { isFeatureFlagEnabled as defaultFeatureFlag } from "@/shared/utils/featureFlags";
 import { OMNIROUTE_RESPONSE_HEADERS } from "@/shared/constants/headers";
 import { SSE_HEARTBEAT_INTERVAL_MS } from "../../config/constants.ts";
+import {
+  wrapWithCodexOpaqueResponsesReplayCapture,
+  type CodexOpaqueResponsesReplayContext,
+} from "./codexOpaqueResponsesReplayCapture.ts";
 
 type HeadersLike = Headers | Record<string, unknown> | null | undefined;
+type StreamingController = Parameters<typeof defaultPipeWithDisconnect>[2];
 
 export interface StreamingPipelineDeps {
   wantsProgress: typeof defaultWantsProgress;
@@ -50,14 +55,15 @@ const DEFAULT_DEPS: StreamingPipelineDeps = {
 
 export function assembleStreamingPipeline(
   args: {
-    providerResponse: unknown;
-    transformStream: unknown;
-    streamController: { signal: AbortSignal };
+    providerResponse: Response;
+    transformStream: TransformStream<Uint8Array, Uint8Array>;
+    streamController: StreamingController;
     createPiiTransform: unknown;
     clientRawRequestHeaders: HeadersLike;
-    clientResponseFormat: unknown;
+    clientResponseFormat: string | null | undefined;
     echoModel: string | null | undefined;
     responseHeaders: Record<string, string>;
+    codexOpaqueResponsesReplay?: CodexOpaqueResponsesReplayContext;
   },
   deps: StreamingPipelineDeps = DEFAULT_DEPS
 ) {
@@ -65,9 +71,15 @@ export function assembleStreamingPipeline(
   const progressEnabled = deps.wantsProgress(args.clientRawRequestHeaders);
   let finalStream;
 
+  const transformStream = args.codexOpaqueResponsesReplay
+    ? wrapWithCodexOpaqueResponsesReplayCapture(
+        args.codexOpaqueResponsesReplay,
+        args.transformStream
+      )
+    : args.transformStream;
   let piiStream = deps.pipeWithDisconnect(
     args.providerResponse,
-    args.transformStream,
+    transformStream,
     args.streamController
   );
   if (typeof args.createPiiTransform === "function") {
@@ -77,7 +89,9 @@ export function assembleStreamingPipeline(
   }
 
   if (progressEnabled) {
-    const progressTransform = deps.createProgressTransform({ signal: args.streamController.signal });
+    const progressTransform = deps.createProgressTransform({
+      signal: args.streamController.signal,
+    });
     // Chain: provider → transform → progress → client
     finalStream = piiStream.pipeThrough(progressTransform);
     args.responseHeaders[OMNIROUTE_RESPONSE_HEADERS.progress] = "enabled";
