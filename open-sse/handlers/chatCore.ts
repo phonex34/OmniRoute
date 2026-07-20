@@ -3290,6 +3290,7 @@ async function handleChatCoreInner({
     modelInfo,
     forcedConnectionId,
     apiKeyInfo,
+    nativeCodexPassthrough,
     attachCompressionUsageReceiptAfterAnalytics,
     body,
     bodyForCacheWrite,
