@@ -24,6 +24,7 @@ import {
   X_SEARCH_TOOL_TYPES,
   TOOL_SEARCH_TOOL_TYPES,
   IMAGE_GENERATION_TOOL_TYPES,
+  toArray,
   toRecord,
   toString,
   normalizeVerbosity,
@@ -463,8 +464,8 @@ export function openaiResponsesToOpenAIRequest(
           } else {
             pendingReasoningContent = appendReasoningContent(pendingReasoningContent, reasoning);
           }
+          continue;
         }
-        continue;
       }
 
       // Claude → Responses stores its native thinking signature or opaque redacted
