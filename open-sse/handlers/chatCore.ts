@@ -348,6 +348,7 @@ import {
   cacheReasoningFromAssistantMessage,
   requiresReasoningReplay,
 } from "../services/reasoningCache.ts";
+import { codexOpaqueResponsesReplayStore } from "../services/codexOpaqueResponsesReplayStore.ts";
 import { isCompactResponsesEndpoint } from "../executors/codex.ts";
 import { persistCodexChildQuotaResponse } from "../services/codexAccount/index.ts";
 import { invalidateCodexQuotaCache } from "../services/codexQuotaFetcher.ts";
@@ -6147,6 +6148,19 @@ export async function handleChatCore({
     );
   }
 
+  const codexOpaqueResponsesReplay =
+    provider === "codex" && targetFormat === FORMATS.OPENAI_RESPONSES && !nativeCodexPassthrough
+      ? (() => {
+          const sessionId = extractSessionAffinityKey(body, clientRawRequest?.headers);
+          return sessionId && !sessionId.startsWith("input:sha256:") && effectiveModel
+            ? {
+                model: effectiveModel,
+                sessionId,
+                store: (value) => codexOpaqueResponsesReplayStore.appendTurn(value),
+              }
+            : undefined;
+        })()
+      : undefined;
   const finalStream = assembleStreamingPipeline({
     providerResponse,
     transformStream,
@@ -6161,6 +6175,7 @@ export async function handleChatCore({
     // that same patience for their first REAL content, not just their first
     // lifecycle frame. See pipeWithDisconnect's own doc comment.
     contentStallTimeoutMs: streamReadinessPolicy.timeoutMs,
+    codexOpaqueResponsesReplay,
   });
 
   // ── Gamification event (fire-and-forget) ──
