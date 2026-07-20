@@ -462,7 +462,7 @@ export default function QuotaCardExpanded({
             {tr("updatedShort", "Updated")} {refreshedLabel}
           </span>
         )}
-        <div className="flex flex-wrap items-center justify-end gap-1.5 ml-auto">
+        <div className="flex flex-wrap items-center justify-end gap-1.5 ml-auto min-w-0 max-w-full">
           {canRedeemResetCredit && (
             <button
               type="button"
