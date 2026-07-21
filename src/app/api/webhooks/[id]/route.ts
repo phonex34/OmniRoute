@@ -15,7 +15,7 @@ import { encryptMetadata } from "@/lib/webhookDispatcher";
 import { isEncryptionEnabled } from "@/lib/db/encryption";
 import { parseAndValidateWebhookUrl } from "@/shared/network/outboundUrlGuard";
 
-const WEBHOOK_KINDS = ["slack", "telegram", "discord", "custom"] as const;
+const WEBHOOK_KINDS = ["slack", "telegram", "discord", "msteams", "custom"] as const;
 const WEBHOOK_EVENT_VALUES = [
   "*",
   "request.completed",
