@@ -156,6 +156,7 @@ export async function dispatchEvent(event: WebhookEvent, data: Record<string, an
   const { buildTelegramUrl, buildTelegramPayload } =
     await import("./webhooks/integrations/telegram");
   const { buildDiscordPayload } = await import("./webhooks/integrations/discord");
+  const { buildMsTeamsPayload } = await import("./webhooks/integrations/msteams");
 
   const webhooks = getEnabledWebhooks();
   const payload: WebhookPayload = {
@@ -178,6 +179,9 @@ export async function dispatchEvent(event: WebhookEvent, data: Record<string, an
         } else if (kind === "discord") {
           const discordPayload = buildDiscordPayload(event, data);
           result = await deliverRaw(wh.url, discordPayload as unknown as Record<string, unknown>);
+        } else if (kind === "msteams") {
+          const teamsPayload = buildMsTeamsPayload(event, data);
+          result = await deliverRaw(wh.url, teamsPayload as unknown as Record<string, unknown>);
         } else if (kind === "telegram") {
           const meta = decryptMetadata(wh.metadata_encrypted ?? null);
           const botToken = meta?.botToken;
