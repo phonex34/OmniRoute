@@ -2509,6 +2509,36 @@ async function handleChatCoreInner({
         // passthrough — including the temperature+top_p pair the VS Code Claude
         // extension sends, and `safeguards` when its paired beta is not forwarded.
         stripClaudeRejectedTopLevelFields(translatedBody, clientRawRequest?.headers);
+
+        // Opt-in (per-connection "summarized thinking display"): redact-thinking beta
+        // returns signature-only (empty-text) thinking blocks unless the request sets
+        // thinking.display="summarized". Mirrors CLIProxyAPI's ensureClaudeThinkingDisplay
+        // so Claude OAuth streams visible thinking deltas. Off by default.
+        const claudeRequestDefaults = getClaudeCodeCompatibleRequestDefaults(
+          credentials?.providerSpecificData
+        );
+        const thinkingConfig = translatedBody.thinking;
+        if (
+          claudeRequestDefaults.summarizeThinking === true &&
+          thinkingConfig &&
+          typeof thinkingConfig === "object"
+        ) {
+          const thinkingType = String((thinkingConfig as Record<string, unknown>).type ?? "")
+            .trim()
+            .toLowerCase();
+          const hasDisplay =
+            Object.prototype.hasOwnProperty.call(thinkingConfig, "display") &&
+            String((thinkingConfig as Record<string, unknown>).display ?? "").trim().length > 0;
+          if (
+            !hasDisplay &&
+            (thinkingType === "enabled" || thinkingType === "adaptive" || thinkingType === "auto")
+          ) {
+            translatedBody.thinking = {
+              ...(thinkingConfig as Record<string, unknown>),
+              display: "summarized",
+            };
+          }
+        }
       }
 
       // Legacy models reject role:"system" messages. Supported models accept
