@@ -106,6 +106,7 @@ import { applyCustomSystemPrompt } from "./chatCore/customSystemPrompt.ts";
 import { applyProviderSystemTransforms } from "../services/systemTransforms.ts";
 import { translateRequest } from "../translator/index.ts";
 import { applyReasoningRuleDirective } from "@/lib/reasoningRouting/policy";
+import { getClaudeCodeCompatibleRequestDefaults } from "@/lib/providers/requestDefaults";
 import { withReasoningRuleContext } from "../utils/reasoningRuleContext.ts";
 import { FORMATS } from "../translator/formats.ts";
 import { collectCustomToolNamesForSourceFormat } from "../translator/request/openai-responses/additionalTools.ts";
@@ -2206,6 +2207,9 @@ async function handleChatCoreInner({
         effectiveModel,
         targetFormat,
         preserveCacheControl,
+        summarizeThinking:
+          getClaudeCodeCompatibleRequestDefaults(credentials?.providerSpecificData)
+            .summarizeThinking === true,
         normalizeClaudeUpstreamMessages,
         applyReasoningRuleDirective,
         log,
