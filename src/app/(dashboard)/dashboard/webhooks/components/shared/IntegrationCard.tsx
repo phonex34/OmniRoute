@@ -1,27 +1,27 @@
 "use client";
 
-export type WebhookKind = "slack" | "telegram" | "discord" | "custom";
-export type ComingSoonKind = "email" | "pagerduty" | "teams";
+export type WebhookKind = "slack" | "telegram" | "discord" | "msteams" | "custom";
+export type ComingSoonKind = "email" | "pagerduty";
 type AnyKind = WebhookKind | ComingSoonKind;
 
 const KIND_ICONS: Record<AnyKind, string> = {
   slack: "chat",
   telegram: "send",
   discord: "forum",
+  msteams: "groups",
   custom: "webhook",
   email: "email",
   pagerduty: "notifications_active",
-  teams: "groups",
 };
 
 const KIND_COLORS: Record<AnyKind, string> = {
   slack: "text-emerald-500",
   telegram: "text-blue-500",
   discord: "text-violet-500",
+  msteams: "text-indigo-500",
   custom: "text-amber-500",
   email: "text-text-muted",
   pagerduty: "text-text-muted",
-  teams: "text-text-muted",
 };
 
 interface IntegrationCardProps {
