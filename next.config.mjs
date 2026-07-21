@@ -207,6 +207,8 @@ const nextConfig = {
       "./src/mitm/server.cjs",
       "./open-sse/services/compression/engines/rtk/filters/**/*.json",
       "./open-sse/services/compression/rules/**/*.json",
+      // Thinking-suffix model capability registry (read via fs at runtime, #thinking-suffix)
+      "./open-sse/services/thinking/models.json",
       "./open-sse/lib/sha3_wasm_bg.wasm",
       "./open-sse/lib/deepseek-pow-solver.cjs",
       // sql.js WASM is loaded at runtime by the sqljsAdapter fallback tier
