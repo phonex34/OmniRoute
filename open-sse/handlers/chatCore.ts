@@ -1775,6 +1775,36 @@ export async function handleChatCore({
         if (translatedBody.temperature !== undefined && translatedBody.top_p !== undefined) {
           delete translatedBody.top_p;
         }
+
+        // Opt-in (per-connection "summarized thinking display"): redact-thinking beta
+        // returns signature-only (empty-text) thinking blocks unless the request sets
+        // thinking.display="summarized". Mirrors CLIProxyAPI's ensureClaudeThinkingDisplay
+        // so Claude OAuth streams visible thinking deltas. Off by default.
+        const claudeRequestDefaults = getClaudeCodeCompatibleRequestDefaults(
+          credentials?.providerSpecificData
+        );
+        const thinkingConfig = translatedBody.thinking;
+        if (
+          claudeRequestDefaults.summarizeThinking === true &&
+          thinkingConfig &&
+          typeof thinkingConfig === "object"
+        ) {
+          const thinkingType = String((thinkingConfig as Record<string, unknown>).type ?? "")
+            .trim()
+            .toLowerCase();
+          const hasDisplay =
+            Object.prototype.hasOwnProperty.call(thinkingConfig, "display") &&
+            String((thinkingConfig as Record<string, unknown>).display ?? "").trim().length > 0;
+          if (
+            !hasDisplay &&
+            (thinkingType === "enabled" || thinkingType === "adaptive" || thinkingType === "auto")
+          ) {
+            translatedBody.thinking = {
+              ...(thinkingConfig as Record<string, unknown>),
+              display: "summarized",
+            };
+          }
+        }
       }
 
       // Fix #2468: always extract role:"system" → top-level system.

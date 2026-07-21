@@ -559,6 +559,13 @@ export default function EditConnectionModal({
         };
         if (isClaude) {
           updates.providerSpecificData.blockExtraUsage = formData.blockExtraUsage;
+          updates.providerSpecificData.requestDefaults = {
+            ...(typeof updates.providerSpecificData.requestDefaults === "object" &&
+            updates.providerSpecificData.requestDefaults
+              ? updates.providerSpecificData.requestDefaults
+              : {}),
+            ...(formData.ccCompatibleSummarizeThinking ? { summarizeThinking: true } : {}),
+          };
         }
         if (isCodex) {
           updates.providerSpecificData.requestDefaults = {
@@ -688,6 +695,14 @@ export default function EditConnectionModal({
               onChange={(checked) => setFormData({ ...formData, blockExtraUsage: checked })}
               label={t("blockClaudeExtraUsageLabel")}
               description={t("blockClaudeExtraUsageDescription")}
+            />
+            <Toggle
+              checked={formData.ccCompatibleSummarizeThinking}
+              onChange={(checked) =>
+                setFormData({ ...formData, ccCompatibleSummarizeThinking: checked })
+              }
+              label={t("ccCompatibleSummarizeThinkingLabel")}
+              description={t("ccCompatibleSummarizeThinkingDescription")}
             />
           </div>
         )}
