@@ -18,7 +18,7 @@ import { parseAndValidateWebhookUrl } from "@/shared/network/outboundUrlGuardPol
 import { WEBHOOK_EVENT_VALUES } from "@/lib/webhooks/eventDescriptions";
 import { WEBHOOK_SECRET_MAX_LENGTH, WEBHOOK_URL_MAX_LENGTH } from "@/shared/constants/formLimits";
 
-const WEBHOOK_KINDS = ["slack", "telegram", "discord", "custom"] as const;
+const WEBHOOK_KINDS = ["slack", "telegram", "discord", "msteams", "custom"] as const;
 const WEBHOOK_EVENT_VALUES_WITH_WILDCARD = ["*", ...WEBHOOK_EVENT_VALUES] as const;
 
 const updateWebhookSchema = z
