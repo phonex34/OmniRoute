@@ -36,3 +36,14 @@ test("editing an existing webhook reuses the current webhook payload", () => {
   assert.match(wizardSource, /\.\.\.buildConfigPayload\(\),/);
   assert.match(wizardSource, /step2Valid\(state, isEditing\)/);
 });
+
+test("editing an msteams webhook reuses its config instead of falling back to a blank URL", () => {
+  assert.match(wizardSource, /msteams: MsTeamsConfig;/);
+  assert.match(wizardSource, /msteams: \{ webhookUrl: "" \},/);
+  assert.match(
+    wizardSource,
+    /msteams: \{ webhookUrl: webhook\.kind === "msteams" \? webhook\.url : "" \},/
+  );
+  assert.match(wizardSource, /if \(kind === "msteams"\) return state\.msteams\.webhookUrl/);
+  assert.match(wizardSource, /if \(kind === "msteams"\) return \{ kind, url: state\.msteams/);
+});
