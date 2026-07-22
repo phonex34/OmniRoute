@@ -10,7 +10,12 @@
  */
 
 import { getClaudeCodeVersion, fetchClaudeBootstrap } from "../../executors/claudeIdentity.ts";
-import { isClaudeOauthUsageCoolingDown, markClaudeOauthUsage429 } from "../claudeUsageCooldown.ts";
+import {
+  isClaudeOauthUsageCoolingDown,
+  markClaudeOauthUsage429,
+  isClaudeUsageFetchTooSoon,
+  markClaudeUsageFetchAttempt,
+} from "../claudeUsageCooldown.ts";
 import { toRecord } from "./scalars.ts";
 import { normalizeClaudeUsageQuotas } from "./claudeQuota.ts";
 
@@ -48,12 +53,14 @@ export async function getClaudeUsage(accessToken?: string) {
 
   // Refresh bootstrap in parallel; best-effort, failure non-fatal.
   const bootstrapPromise = fetchClaudeBootstrap(accessToken).catch(() => null);
-  // Skip OAuth usage call while this token is cooling down from a recent 429
-  // (chat with the same token still works — only the quota endpoint is throttled).
-  if (isClaudeOauthUsageCoolingDown(accessToken)) {
+  // Skip OAuth usage call while this token is cooling down from a recent 429,
+  // or when the previous poll was too recent (proactive min-interval gate). Chat
+  // with the same token still works — only the quota endpoint is throttled.
+  if (isClaudeOauthUsageCoolingDown(accessToken) || isClaudeUsageFetchTooSoon(accessToken)) {
     const legacy = await getClaudeUsageLegacy(accessToken);
     return { ...legacy, bootstrap: await bootstrapPromise };
   }
+  markClaudeUsageFetchAttempt(accessToken);
   try {
     // Real CLI uses axios here, not Stainless — UA is `claude-code/<version>`
     // (not `claude-cli/...`) and the shape is simpler than /v1/messages.
