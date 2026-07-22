@@ -471,13 +471,83 @@ export function stripInvalidSchemaConstructs(schema: unknown): unknown {
   return result;
 }
 
+/**
+ * Anthropic rejects `oneOf`/`allOf`/`anyOf` at the TOP LEVEL of a tool
+ * `input_schema` (`tools.N.custom.input_schema: input_schema does not support
+ * oneOf, allOf, or anyOf at the top level`). The same keywords NESTED inside a
+ * property schema are valid and must be preserved, so this pass only touches the
+ * root object — it never recurses (unlike the Gemini flattener, which strips at
+ * every depth because Gemini is stricter).
+ *
+ * `allOf` is merged (union of `properties`, union of `required`). `anyOf`/`oneOf`
+ * merge the `properties` of every object-typed variant (union) and keep only the
+ * `required` fields shared by all object variants (intersection) so the model is
+ * never told a branch-specific field is mandatory. If no variant yields
+ * properties, the schema falls back to a permissive empty object so Anthropic
+ * still receives a valid `input_schema`.
+ */
+export function flattenTopLevelClaudeCombinators(schema: unknown): unknown {
+  if (!isPlainObject(schema)) return schema;
+  if (!("allOf" in schema) && !("anyOf" in schema) && !("oneOf" in schema)) {
+    return schema;
+  }
+
+  const result: JsonRecord = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === "allOf" || key === "anyOf" || key === "oneOf") continue;
+    result[key] = value;
+  }
+
+  const mergedProps: JsonRecord = isPlainObject(result.properties) ? { ...result.properties } : {};
+  const baseRequired = Array.isArray(result.required)
+    ? result.required.filter((r): r is string => typeof r === "string")
+    : [];
+  const requiredSets: string[][] = [];
+
+  const branches = [schema.allOf, schema.anyOf, schema.oneOf];
+  for (let i = 0; i < branches.length; i++) {
+    const branch = branches[i];
+    if (!Array.isArray(branch)) continue;
+    const isAllOf = i === 0;
+    const objectVariants = branch.filter(
+      (v): v is JsonRecord => isPlainObject(v) && v.type !== "null"
+    );
+    for (const variant of objectVariants) {
+      if (isPlainObject(variant.properties)) Object.assign(mergedProps, variant.properties);
+      const variantRequired = Array.isArray(variant.required)
+        ? variant.required.filter((r): r is string => typeof r === "string")
+        : [];
+      // allOf branches are conjunctive → every field is still required.
+      // anyOf/oneOf branches are disjunctive → only keep the intersection.
+      if (isAllOf) baseRequired.push(...variantRequired);
+      else requiredSets.push(variantRequired);
+    }
+  }
+
+  let required = Array.from(new Set(baseRequired));
+  if (requiredSets.length > 0) {
+    const intersection = requiredSets.reduce((acc, set) =>
+      acc.filter((field) => set.includes(field))
+    );
+    required = Array.from(new Set([...required, ...intersection]));
+  }
+  required = required.filter((field) => field in mergedProps);
+
+  result.type = "object";
+  result.properties = mergedProps;
+  if (required.length > 0) result.required = required;
+  else delete result.required;
+
+  return result;
+}
+
 export function sanitizeClaudeToolSchema(schema: unknown): unknown {
   // stripInvalidSchemaConstructs now also coerces numeric-string constraints, so
   // it is the single pass for the Claude path. We deliberately do NOT compose
   // coerceSchemaNumericFields: it strips the valid `default` keyword (Fix #1782,
   // a translator concern) which on the native / passthrough surface would
   // silently alter tool schemas that were previously forwarded verbatim.
-  return stripInvalidSchemaConstructs(schema);
+  return flattenTopLevelClaudeCombinators(stripInvalidSchemaConstructs(schema));
 }
 
 export function sanitizeClaudeToolSchemas(tools: unknown): unknown {

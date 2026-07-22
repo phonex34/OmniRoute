@@ -310,7 +310,35 @@ export function openaiResponsesToOpenAIRequest(
     }
 
     if (itemType === "reasoning") {
-      // Skip reasoning items - they are display-only metadata
+      // Claude → Responses stores its native thinking signature or opaque redacted
+      // payload in encrypted_content. Replay it only when that field is present;
+      // generic Responses reasoning remains display-only metadata.
+      const encryptedContent = toString(item.encrypted_content);
+      if (!encryptedContent) {
+        continue;
+      }
+
+      const summaryText = toArray(item.summary)
+        .map((summaryValue) => toRecord(summaryValue))
+        .filter((summary) => toString(summary.type) === "summary_text")
+        .map((summary) => toString(summary.text))
+        .filter(Boolean)
+        .join("\n");
+
+      if (!currentAssistantMsg) {
+        currentAssistantMsg = {
+          role: "assistant",
+          content: [],
+        };
+      }
+
+      const content = Array.isArray(currentAssistantMsg.content) ? currentAssistantMsg.content : [];
+      content.push(
+        summaryText
+          ? { type: "thinking", thinking: summaryText, signature: encryptedContent }
+          : { type: "redacted_thinking", data: encryptedContent }
+      );
+      currentAssistantMsg.content = content;
       continue;
     }
   }

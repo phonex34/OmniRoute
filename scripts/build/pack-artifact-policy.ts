@@ -49,7 +49,7 @@ export const APP_STAGING_ALLOWED_EXACT_PATHS: string[] = [
   "main-server-timeouts.mjs",
   "responses-ws-proxy.mjs",
   "scripts/dev/sync-env.mjs",
-  "scripts/dev/tls-options.mjs",
+  "tls-options.mjs",
   "server.js",
   "server-ws.mjs",
   // #5452: dist/tls-options.mjs is copied by assembleStandalone (EXTRA_MODULE_ENTRIES)
@@ -69,6 +69,7 @@ export const APP_STAGING_ALLOWED_PATH_PREFIXES: string[] = [
   "node_modules/",
   "open-sse/services/compression/engines/rtk/filters/",
   "open-sse/services/compression/rules/",
+  "open-sse/services/thinking/",
   "public/",
   "src/lib/db/migrations/",
   "src/mitm/",
@@ -149,6 +150,7 @@ export const PACK_ARTIFACT_ROOT_ALLOWED_PATH_PREFIXES: string[] = [
 export const PACK_ARTIFACT_REQUIRED_PATHS: string[] = [
   "dist/open-sse/services/compression/engines/rtk/filters/generic-output.json",
   "dist/open-sse/services/compression/rules/en/filler.json",
+  "dist/open-sse/services/thinking/models.json",
   "dist/server.js",
   "dist/server-ws.mjs",
   "dist/responses-ws-proxy.mjs",

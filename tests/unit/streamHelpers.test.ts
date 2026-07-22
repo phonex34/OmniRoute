@@ -68,6 +68,19 @@ describe("hasValuableContent", () => {
       const chunk = { type: "content_block_delta", delta: { thinking: "reasoning" } };
       assert.strictEqual(hasValuableContent(chunk, FORMATS.CLAUDE), true);
     });
+
+    it("returns true for signature_delta (carries the thinking signature, must not be dropped)", () => {
+      const chunk = {
+        type: "content_block_delta",
+        delta: { type: "signature_delta", signature: "EoMICmMIDxgCKkDuxfF..." },
+      };
+      assert.strictEqual(hasValuableContent(chunk, FORMATS.CLAUDE), true);
+    });
+
+    it("returns false for a typeless object that would emit `data: {}`", () => {
+      assert.strictEqual(hasValuableContent({}, FORMATS.CLAUDE), false);
+      assert.strictEqual(hasValuableContent({ type: "" }, FORMATS.CLAUDE), false);
+    });
   });
 
   describe("Gemini format", () => {

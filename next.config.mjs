@@ -207,12 +207,22 @@ const nextConfig = {
       "./src/mitm/server.cjs",
       "./open-sse/services/compression/engines/rtk/filters/**/*.json",
       "./open-sse/services/compression/rules/**/*.json",
+      // Thinking-suffix model capability registry (read via fs at runtime, #thinking-suffix)
+      "./open-sse/services/thinking/models.json",
       "./open-sse/lib/sha3_wasm_bg.wasm",
       "./open-sse/lib/deepseek-pow-solver.cjs",
       // sql.js WASM is loaded at runtime by the sqljsAdapter fallback tier
       // (better-sqlite3 → node:sqlite → sql.js). Next traces sql-wasm.js but can
       // omit the runtime sql-wasm.wasm asset from the standalone bundle.
       "./node_modules/sql.js/dist/sql-wasm.wasm",
+      // These packages are reached via dynamic import() (optional/soft deps) so
+      // Next's file tracing copies only their package.json, not their built code,
+      // which crashes the standalone MCP/server at runtime with ERR_MODULE_NOT_FOUND.
+      // Force-include the full package so the standalone bundle can load them.
+      "./node_modules/ioredis/**/*",
+      "./node_modules/undici/**/*",
+      "./node_modules/lru-cache/**/*",
+      "./node_modules/@atjsh/llmlingua-2/**/*",
     ],
   },
   outputFileTracingExcludes: {
@@ -651,6 +661,17 @@ const nextConfig = {
   },
 };
 
-const withMDX = createMDX();
+// OMNIROUTE_SKIP_DOCS=1 excludes the in-app fumadocs `/docs` site from the build.
+// When set, we must NOT call/apply `createMDX()`: invoking it eagerly runs the MDX
+// source generation (scanning the 1,187 docs markdown files) and applying the wrap
+// registers the MDX webpack/turbopack loaders that compile them — the main build-time
+// memory/CPU cost. Skipping both means the docs markdown is never scanned or compiled.
+// The `/docs` route group (its only consumer via `@/lib/source` → `.source/server`) is
+// physically moved out of the build by `scripts/build/skipDocsPages.mjs`, wired into
+// `build-next-isolated.mjs`, so nothing imports the (now un-generated) `.source/server`.
+// Default (flag unset) behavior is unchanged: `createMDX()` runs and wraps as before.
+const skipDocs = process.env.OMNIROUTE_SKIP_DOCS === "1";
 
-export default withMDX(withNextIntl(nextConfig));
+export default skipDocs
+  ? withNextIntl(nextConfig)
+  : createMDX()(withNextIntl(nextConfig));

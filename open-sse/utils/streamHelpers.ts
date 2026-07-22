@@ -362,13 +362,21 @@ export function hasValuableContent(chunk: Record<string, unknown>, format: strin
 
   // Claude format
   if (format === FORMATS.CLAUDE) {
+    // A typeless Claude object (e.g. `{}`) serializes to `data: {}` and crashes
+    // strict Anthropic clients with "No matching discriminator" at path ["type"].
+    if (typeof chunk.type !== "string" || chunk.type.length === 0) return false;
     const isContentBlockDelta = chunk.type === "content_block_delta";
     if (isContentBlockDelta) {
       const delta = isRecord(chunk.delta) ? chunk.delta : {};
       const hasText = typeof delta.text === "string" && delta.text.length > 0;
       const hasThinking = typeof delta.thinking === "string" && delta.thinking.length > 0;
       const hasInputJson = typeof delta.partial_json === "string" && delta.partial_json.length > 0;
-      if (!hasText && !hasThinking && !hasInputJson) return false;
+      // A signature_delta carries the thinking block's cryptographic signature in
+      // `delta.signature` with no text/thinking/partial_json. Dropping it as "empty"
+      // strips the signature from the client's thinking block, so the next multi-turn
+      // replay sends an unsigned thinking block that Anthropic then rejects.
+      const hasSignature = typeof delta.signature === "string" && delta.signature.length > 0;
+      if (!hasText && !hasThinking && !hasInputJson && !hasSignature) return false;
     }
     return true;
   }
@@ -452,7 +460,11 @@ export function formatSSE(data: unknown, sourceFormat: string): string {
   data = cleanPerfMetrics(data);
 
   // Claude format
-  if (sourceFormat === FORMATS.CLAUDE && isRecord(data) && data.type) {
+  if (sourceFormat === FORMATS.CLAUDE && isRecord(data)) {
+    // Drop typeless Claude payloads: serializing `{}` here crashes strict Anthropic
+    // clients (zod discriminatedUnion on `type`, path ["type"]). Last-line defense for
+    // every Claude SSE path, not just passthrough.
+    if (typeof data.type !== "string" || data.type.length === 0) return "";
     return `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`;
   }
 

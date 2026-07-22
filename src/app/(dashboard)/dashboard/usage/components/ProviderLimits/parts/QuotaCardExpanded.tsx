@@ -254,7 +254,7 @@ export default function QuotaCardExpanded({
         </button>
       )}
 
-      <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-border/40">
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-border/40">
         {refreshedLabel && (
           <span
             className={`text-[10px] tabular-nums ${
@@ -269,7 +269,7 @@ export default function QuotaCardExpanded({
             {tr("updatedShort", "Updated")} {refreshedLabel}
           </span>
         )}
-        <div className="flex items-center gap-1.5 ml-auto">
+        <div className="flex flex-wrap items-center gap-1.5 ml-auto min-w-0 max-w-full">
           {canRedeemResetCredit && (
             <button
               type="button"

@@ -245,7 +245,7 @@ export const removeModelAliasSchema = z.object({
 export const createProviderNodeSchema = z
   .object({
     name: z.string().trim().min(1, "Name is required"),
-    prefix: z.string().trim().min(1, "Prefix is required"),
+    prefix: z.string().trim().min(1).optional().or(z.literal("")),
     apiType: z
       .enum([
         "chat",
@@ -281,7 +281,7 @@ export const createProviderNodeSchema = z
 
 export const updateProviderNodeSchema = z.object({
   name: z.string().trim().min(1, "Name is required"),
-  prefix: z.string().trim().min(1, "Prefix is required"),
+  prefix: z.string().trim().min(1).optional().or(z.literal("")),
   apiType: z
     .enum([
       "chat",

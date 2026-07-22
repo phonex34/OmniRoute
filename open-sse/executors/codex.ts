@@ -1,4 +1,5 @@
 import { getCodexRequestDefaults } from "@/lib/providers/requestDefaults";
+import { extractSessionAffinityKey } from "@/sse/services/auth";
 import {
   getCodexModelScope,
   getCodexRateLimitKey,
@@ -33,9 +34,14 @@ import { getAccessToken } from "../services/tokenRefresh.ts";
 import { sanitizeResponsesInputItems } from "../services/responsesInputSanitizer.ts";
 import { normalizeCodexVerbosity } from "../services/codexVerbosity.ts";
 import { getThinkingBudgetConfig, ThinkingMode } from "../services/thinkingBudget.ts";
+import {
+  codexOpaqueResponsesReplayStore,
+  type CodexOpaqueResponsesReplayItem,
+} from "../services/codexOpaqueResponsesReplayStore.ts";
 import { CORS_HEADERS } from "../utils/cors.ts";
 import { errorResponse } from "../utils/error.ts";
 import { normalizeCodexResponsesInput } from "../utils/responsesInputNormalization.ts";
+import { generateToolCallId } from "../translator/helpers/toolCallHelper.ts";
 import * as prl from "../utils/providerRequestLogging.ts";
 import { createRequire } from "module";
 // Quota parsing/scheduling extracted to a pure leaf; re-exported for external
@@ -66,6 +72,24 @@ type WreqWebSocket = {
 };
 type WebsocketFn = (url: string, opts?: Record<string, unknown>) => Promise<WreqWebSocket>;
 type ResponsesMessageInput = { role?: unknown; phase?: unknown; content?: unknown };
+type ResponsesInputItem = Record<string, unknown>;
+
+type CursorContentPart = {
+  type?: unknown;
+  id?: unknown;
+  name?: unknown;
+  input?: unknown;
+  tool_use_id?: unknown;
+  content?: unknown;
+  image_url?: unknown;
+  image?: unknown;
+  source?: unknown;
+  detail?: unknown;
+  text?: unknown;
+  url?: unknown;
+  data?: unknown;
+  media_type?: unknown;
+};
 
 let _websocketFn: WebsocketFn | null = null;
 let _wreqChecked = false;
@@ -205,6 +229,173 @@ function convertSystemToDeveloperRole(body: Record<string, unknown>): void {
  *      server-generated prefix (rs_, fc_, resp_, msg_) — so the content is
  *      preserved but the backend won't try to look it up
  */
+type CodexOpaqueReplayProvenance = {
+  readonly model: string;
+  readonly sessionId: string;
+  readonly expectedTurnMarker: string;
+};
+
+type CodexReplayRecoveryContext = {
+  replayEnabled: boolean;
+  provenance: CodexOpaqueReplayProvenance | null;
+};
+
+const codexReplayRecoveryContexts = new WeakMap<object, CodexReplayRecoveryContext>();
+
+function getCodexReplayRecoveryContext(body: unknown): CodexReplayRecoveryContext | null {
+  return body !== null && typeof body === "object" && !Array.isArray(body)
+    ? (codexReplayRecoveryContexts.get(body) ?? null)
+    : null;
+}
+
+function setCodexReplayRecoveryContext(body: unknown, context: CodexReplayRecoveryContext): void {
+  if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    codexReplayRecoveryContexts.set(body, context);
+  }
+}
+
+async function isCodexStalePrivateReplayError(response: Response): Promise<boolean> {
+  const text = await response.clone().text();
+  try {
+    const body: unknown = JSON.parse(text);
+    return hasCodexStalePrivateReplayMessage(body);
+  } catch (error) {
+    if (error instanceof SyntaxError) return false;
+    throw error;
+  }
+}
+
+function hasCodexStalePrivateReplayMessage(body: unknown): boolean {
+  if (typeof body === "string") {
+    return /invalid signature in thinking block|invalid_encrypted_content/i.test(body);
+  }
+  if (!body || typeof body !== "object") return false;
+  if (Array.isArray(body)) return body.some(hasCodexStalePrivateReplayMessage);
+  return Object.values(body).some(hasCodexStalePrivateReplayMessage);
+}
+
+function injectCodexOpaqueResponsesReplay(
+  body: Record<string, unknown>,
+  model: string,
+  sessionId: string | null
+): CodexOpaqueReplayProvenance | null {
+  if (!sessionId || !Array.isArray(body.input)) return null;
+
+  const replayChain = codexOpaqueResponsesReplayStore.getChain({ model, sessionId });
+  if (!replayChain) return null;
+
+  let provenance: CodexOpaqueReplayProvenance | null = null;
+  const currentOutputIds = collectCurrentCodexToolOutputIds(body.input);
+  const replayedCallIds = new Set<string>();
+  for (const turn of replayChain.turns) {
+    const fragment = toEligibleCodexReplayFragment(turn.items, {
+      currentInput: body.input,
+      currentOutputIds,
+      replayedCallIds,
+    });
+    if (!fragment) continue;
+
+    const outputIndex = findCurrentCodexToolOutputIndex(body.input, fragment.callId);
+    if (outputIndex === -1) continue;
+    body.input.splice(outputIndex, 0, ...fragment.items);
+    provenance = { model, sessionId, expectedTurnMarker: turn.turnMarker };
+  }
+  return provenance;
+}
+
+type CodexReplayFragment = {
+  readonly callId: string;
+  readonly items: readonly ResponsesInputItem[];
+};
+
+function collectCurrentCodexToolOutputIds(input: readonly unknown[]): ReadonlySet<string> {
+  const callIds = new Set<string>();
+  for (const item of input) {
+    const record = toResponsesInputItem(item);
+    if (!record) continue;
+    const callId = getCodexToolOutputCallId(record);
+    if (callId) callIds.add(callId);
+  }
+  return callIds;
+}
+
+type CodexReplayEligibility = {
+  readonly currentInput: readonly unknown[];
+  readonly currentOutputIds: ReadonlySet<string>;
+  readonly replayedCallIds: Set<string>;
+};
+
+function toEligibleCodexReplayFragment(
+  items: readonly CodexOpaqueResponsesReplayItem[],
+  eligibility: CodexReplayEligibility
+): CodexReplayFragment | null {
+  const { currentInput, currentOutputIds, replayedCallIds } = eligibility;
+  const call = items.find(isCodexReplayCall);
+  if (!call || !currentOutputIds.has(call.callId) || replayedCallIds.has(call.callId)) return null;
+
+  const replayItems = items
+    .filter((item) => item.type === "reasoning" || item === call)
+    .filter((item) => !hasEquivalentCodexReplayItem(currentInput, item))
+    .map(toCodexReplayInputItem);
+  replayedCallIds.add(call.callId);
+  return replayItems.length > 0 ? { callId: call.callId, items: replayItems } : null;
+}
+
+function hasEquivalentCodexReplayItem(
+  input: readonly unknown[],
+  item: CodexOpaqueResponsesReplayItem
+): boolean {
+  return input.some((value) => {
+    const record = toResponsesInputItem(value);
+    if (!record || record.type !== item.type) return false;
+    switch (item.type) {
+      case "reasoning":
+        return record.encrypted_content === item.encryptedContent;
+      case "function_call":
+        return record.call_id === item.callId;
+      case "custom_tool_call":
+        return record.call_id === item.callId;
+    }
+  });
+}
+
+function isCodexReplayCall(
+  item: CodexOpaqueResponsesReplayItem
+): item is Extract<CodexOpaqueResponsesReplayItem, { readonly callId: string }> {
+  return item.type === "function_call" || item.type === "custom_tool_call";
+}
+
+function toCodexReplayInputItem(item: CodexOpaqueResponsesReplayItem): ResponsesInputItem {
+  switch (item.type) {
+    case "reasoning":
+      return { type: item.type, encrypted_content: item.encryptedContent };
+    case "function_call":
+      return { type: item.type, call_id: item.callId, name: item.name, arguments: item.arguments };
+    case "custom_tool_call":
+      return { type: item.type, call_id: item.callId, name: item.name, input: item.input };
+  }
+}
+
+function findCurrentCodexToolOutputIndex(input: readonly unknown[], callId: string): number {
+  return input.findIndex((item) => {
+    const record = toResponsesInputItem(item);
+    return record ? getCodexToolOutputCallId(record) === callId : false;
+  });
+}
+
+function getCodexToolOutputCallId(item: ResponsesInputItem): string | null {
+  if (item.type !== "function_call_output" && item.type !== "custom_tool_call_output") return null;
+  return typeof item.call_id === "string" && item.call_id.trim() ? item.call_id : null;
+}
+
+function toResponsesInputItem(value: unknown): ResponsesInputItem | null {
+  return isResponsesInputItem(value) ? value : null;
+}
+
+function isResponsesInputItem(value: unknown): value is ResponsesInputItem {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 export function stripStoredItemReferences(body: Record<string, unknown>): void {
   if (Array.isArray(body.input) && body.input.length === 0) {
     body.input = [
@@ -311,6 +502,149 @@ function repairMissingCodexFunctionCallOutputs(body: Record<string, unknown>): v
       `[Codex] repairMissingCodexFunctionCallOutputs: inserted ${insertedCount} empty function_call_output item(s)`
     );
   }
+}
+
+function toCursorContentPart(value: unknown): CursorContentPart | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as CursorContentPart)
+    : null;
+}
+
+function toResponsesImageInput(part: CursorContentPart): ResponsesInputItem | null {
+  if (part.type === "image_url") {
+    const imageUrl =
+      typeof part.image_url === "string"
+        ? part.image_url
+        : toCursorContentPart(part.image_url)?.url;
+    if (typeof imageUrl !== "string" || !imageUrl) return null;
+    const image: ResponsesInputItem = { type: "input_image", image_url: imageUrl };
+    if (part.detail !== undefined) image.detail = part.detail;
+    return image;
+  }
+
+  if (part.type === "image") {
+    if (typeof part.image === "string" && part.image) {
+      return {
+        type: "input_image",
+        image_url: part.image,
+        ...(part.detail !== undefined ? { detail: part.detail } : {}),
+      };
+    }
+
+    const source = toCursorContentPart(part.source);
+    if (source?.type === "base64" && typeof source.data === "string" && source.data) {
+      const mediaType = typeof source.media_type === "string" ? source.media_type : "image/png";
+      return {
+        type: "input_image",
+        image_url: `data:${mediaType};base64,${source.data}`,
+        ...(part.detail !== undefined ? { detail: part.detail } : {}),
+      };
+    }
+    if (source?.type === "url" && typeof source.url === "string" && source.url) {
+      return {
+        type: "input_image",
+        image_url: source.url,
+        ...(part.detail !== undefined ? { detail: part.detail } : {}),
+      };
+    }
+  }
+
+  return null;
+}
+
+function toToolOutputContent(content: unknown): unknown {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return content == null ? "" : JSON.stringify(content);
+
+  const output: ResponsesInputItem[] = [];
+  for (const contentValue of content) {
+    const part = toCursorContentPart(contentValue);
+    if (!part) {
+      if (typeof contentValue === "string") output.push({ type: "input_text", text: contentValue });
+      continue;
+    }
+    if (part.type === "text") {
+      output.push({ type: "input_text", text: typeof part.text === "string" ? part.text : "" });
+      continue;
+    }
+    const image = toResponsesImageInput(part);
+    if (image) output.push(image);
+  }
+
+  return output.length > 0 ? output : "";
+}
+
+function convertCursorMessagesToResponsesInput(
+  messages: readonly ResponsesMessageInput[]
+): unknown[] {
+  const input: unknown[] = [];
+
+  for (const message of messages) {
+    const role = typeof message.role === "string" ? message.role : "user";
+    const content = typeof message.content === "string" ? [message.content] : message.content;
+    const messageContent: ResponsesInputItem[] = [];
+    const extractedItems: ResponsesInputItem[] = [];
+
+    if (Array.isArray(content)) {
+      for (const contentValue of content) {
+        if (typeof contentValue === "string") {
+          messageContent.push({
+            type: role === "assistant" ? "output_text" : "input_text",
+            text: contentValue,
+          });
+          continue;
+        }
+
+        const part = toCursorContentPart(contentValue);
+        if (!part) continue;
+        if (part.type === "text") {
+          messageContent.push({
+            type: role === "assistant" ? "output_text" : "input_text",
+            text: typeof part.text === "string" ? part.text : "",
+          });
+          continue;
+        }
+        if (part.type === "tool_use") {
+          const name = typeof part.name === "string" ? part.name.trim() : "";
+          if (!name) continue;
+          const callId =
+            typeof part.id === "string" && part.id.trim() ? part.id : generateToolCallId();
+          extractedItems.push({
+            type: "function_call",
+            call_id: callId,
+            name,
+            arguments:
+              typeof part.input === "string" ? part.input : JSON.stringify(part.input ?? {}),
+          });
+          continue;
+        }
+        if (part.type === "tool_result") {
+          const callId = typeof part.tool_use_id === "string" ? part.tool_use_id.trim() : "";
+          if (!callId) continue;
+          extractedItems.push({
+            type: "function_call_output",
+            call_id: callId,
+            output: toToolOutputContent(part.content),
+          });
+          continue;
+        }
+        const image = toResponsesImageInput(part);
+        if (image && role !== "assistant") messageContent.push(image);
+      }
+    }
+
+    if (messageContent.length > 0) {
+      input.push({
+        type: "message",
+        role,
+        ...(typeof message.phase === "string" ? { phase: message.phase } : {}),
+        content: messageContent,
+      });
+    }
+    input.push(...extractedItems);
+  }
+
+  return input;
 }
 
 function getResponsesSubpath(endpointPath: unknown): string | null {
@@ -811,7 +1145,26 @@ export class CodexExecutor extends BaseExecutor {
     const nextInput = { ...input, credentials };
 
     if (!isCodexResponsesWebSocketRequired(nextInput.model, nextInput.credentials)) {
+      const recoveryContext = getCodexReplayRecoveryContext(nextInput.body) ?? {
+        replayEnabled: true,
+        provenance: null,
+      };
+      setCodexReplayRecoveryContext(nextInput.body, recoveryContext);
       const httpResult = await super.execute(nextInput);
+      const response = (httpResult as { response?: Response }).response;
+      const completedRecoveryContext = getCodexReplayRecoveryContext(nextInput.body);
+      if (
+        completedRecoveryContext?.provenance &&
+        response?.status === 400 &&
+        (await isCodexStalePrivateReplayError(response))
+      ) {
+        codexOpaqueResponsesReplayStore.clearChainIfCurrent(completedRecoveryContext.provenance);
+        setCodexReplayRecoveryContext(nextInput.body, {
+          replayEnabled: false,
+          provenance: null,
+        });
+        return super.execute(nextInput);
+      }
       if (codexDropNonstandardEvents()) {
         const resp = (httpResult as { response?: Response }).response;
         if (resp?.body) {
@@ -1164,6 +1517,7 @@ export class CodexExecutor extends BaseExecutor {
         : {};
 
     const nativeCodexPassthrough = body?._nativeCodexPassthrough === true;
+    const replaySessionId = nativeCodexPassthrough ? null : extractSessionAffinityKey(body);
     const isCompactRequest = isCompactResponsesEndpoint(credentials?.requestEndpointPath);
     const requestDefaults = getCodexRequestDefaults(credentials?.providerSpecificData);
     const thinkingBudgetConfig = getThinkingBudgetConfig();
@@ -1191,30 +1545,7 @@ export class CodexExecutor extends BaseExecutor {
     // Issue #1832 & #1853: Map messages to input for clients like Cursor 5.5 that use responses/compact but send messages instead of input.
     // This MUST run before convertSystemToDeveloperRole and stripStoredItemReferences.
     if (!body.input && Array.isArray(body.messages)) {
-      body.input = body.messages.map((msg: ResponsesMessageInput) => ({
-        type: "message",
-        role: typeof msg.role === "string" ? msg.role : "user",
-        ...(typeof msg.phase === "string" ? { phase: msg.phase } : {}),
-        content:
-          typeof msg.content === "string"
-            ? [{ type: "input_text", text: msg.content }]
-            : Array.isArray(msg.content)
-              ? msg.content.map((contentPart: unknown) => {
-                  if (
-                    contentPart &&
-                    typeof contentPart === "object" &&
-                    !Array.isArray(contentPart) &&
-                    (contentPart as Record<string, unknown>).type === "text"
-                  ) {
-                    return {
-                      type: "input_text",
-                      text: (contentPart as Record<string, unknown>).text,
-                    };
-                  }
-                  return contentPart;
-                })
-              : [],
-      }));
+      body.input = convertCursorMessagesToResponsesInput(body.messages);
     } else if (!body.input && typeof body.prompt === "string" && body.prompt.trim()) {
       // Issue #1872: Cursor occasionally passes the request as `prompt` instead of `messages`.
       body.input = [
@@ -1234,13 +1565,20 @@ export class CodexExecutor extends BaseExecutor {
 
     normalizeCodexResponsesInput(body);
 
+    let modelEffort: string | null = null;
+    let cleanModel = typeof body.model === "string" ? body.model : model;
+    const splitModel = splitCodexReasoningSuffix(cleanModel);
+    if (splitModel.effort) {
+      modelEffort = splitModel.effort;
+      body.model = splitModel.baseModel;
+      cleanModel = splitModel.baseModel;
+    }
+
     if (Array.isArray(body.input)) {
       body.input = sanitizeResponsesInputItems(body.input, false, {
         dropInternalAssistantMessages: !nativeCodexPassthrough,
       });
     }
-    repairMissingCodexFunctionCallOutputs(body);
-
     // ── Cache-aware system prompt handling (both paths) ──
     //
     // Convert system → developer role IN-PLACE so system prompts remain in the
@@ -1315,20 +1653,24 @@ export class CodexExecutor extends BaseExecutor {
     // The /codex/responses endpoint does not persist responses even with store=true,
     // so any references to previous response items would cause 404 errors.
     stripStoredItemReferences(body);
+    const replayRecoveryContext = getCodexReplayRecoveryContext(bodyInput);
+    if (
+      replayRecoveryContext?.replayEnabled !== false &&
+      !nativeCodexPassthrough &&
+      replaySessionId &&
+      !replaySessionId.startsWith("input:sha256:")
+    ) {
+      const provenance = injectCodexOpaqueResponsesReplay(body, cleanModel, replaySessionId);
+      if (provenance) {
+        setCodexReplayRecoveryContext(bodyInput, { replayEnabled: true, provenance });
+      }
+    }
+    repairMissingCodexFunctionCallOutputs(body);
 
     // Issue #806: Even for native passthrough, some clients (purist completions) might indiscriminately inject
     // a `messages` or `prompt` array which the strict Codex Responses schema rejects.
     delete body.messages;
     delete body.prompt;
-
-    let modelEffort: string | null = null;
-    let cleanModel = typeof body.model === "string" ? body.model : model;
-    const splitModel = splitCodexReasoningSuffix(cleanModel);
-    if (splitModel.effort) {
-      modelEffort = splitModel.effort;
-      body.model = splitModel.baseModel;
-      cleanModel = splitModel.baseModel;
-    }
 
     const reasoningRecord =
       body.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning)

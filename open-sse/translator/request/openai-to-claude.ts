@@ -3,7 +3,7 @@ import { FORMATS } from "../formats.ts";
 // CLAUDE_SYSTEM_PROMPT import removed — no longer injected unconditionally (#1966/#2130)
 import { supportsClaudeMaxEffort, supportsXHighEffort } from "../../config/providerModels.ts";
 import { adjustMaxTokens } from "../helpers/maxTokensHelper.ts";
-import { sanitizeToolId } from "../helpers/schemaCoercion.ts";
+import { flattenTopLevelClaudeCombinators, sanitizeToolId } from "../helpers/schemaCoercion.ts";
 import { safeParseJSON } from "../helpers/jsonUtil.ts";
 import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 import { isAdaptiveThinkingOnly } from "../../../src/shared/constants/modelSpecs.ts";
@@ -396,10 +396,15 @@ export function openaiToClaudeRequest(model, body, stream) {
             ? { ...rawSchema, properties: {} }
             : rawSchema;
 
+        // Anthropic rejects oneOf/allOf/anyOf at the top level of input_schema.
+        // Flatten only the root (nested combinators stay valid). Covers the
+        // API-key claude path, which skips the OAuth-only sanitizeClaudeToolSchemas.
+        const safeSchema = flattenTopLevelClaudeCombinators(normalizedSchema);
+
         return {
           name: toolName,
           description: toolData.description || "",
-          input_schema: normalizedSchema,
+          input_schema: safeSchema,
         };
       })
       .filter((tool): tool is ClaudeTool => Boolean(tool));
@@ -462,7 +467,13 @@ export function openaiToClaudeRequest(model, body, stream) {
     // No role="system" messages, but body.system exists — pass through as-is
     result.system = Array.isArray(body.system)
       ? body.system
-      : [{ type: "text", text: String(body.system) }];
+      : [
+          {
+            type: "text",
+            text: String(body.system),
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ];
   }
 
   // Attach toolNameMap to result for response translation
@@ -610,10 +621,14 @@ function getContentBlocksFromMessage(
           if (part.type === "redacted_thinking" && part.data === "") {
             continue; // drop — same: empty data from non-Anthropic provider
           }
-          blocks.push({
-            ...part,
-            signature: part.signature || DEFAULT_THINKING_CLAUDE_SIGNATURE,
-          });
+          blocks.push(
+            part.type === "redacted_thinking"
+              ? { ...part }
+              : {
+                  ...part,
+                  signature: part.signature || DEFAULT_THINKING_CLAUDE_SIGNATURE,
+                }
+          );
         } else if (part.type === "tool_use") {
           // Tool name already has prefix from tool declarations, keep as-is
           // CRITICAL: Skip tool_use blocks with empty name (causes Claude 400 error)
