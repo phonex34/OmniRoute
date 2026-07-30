@@ -49,25 +49,26 @@ type ProviderNodeData = {
 
 function ProviderNode({ data }: { data: ProviderNodeData }) {
   const { label, color, providerId, active, error, healthy, last } = data;
-  const GREEN = FLOW_EDGE_COLORS.active;
   const RED = FLOW_EDGE_COLORS.error;
   const AMBER = FLOW_EDGE_COLORS.last;
-  // "Last routed" is a traffic annotation, not a health state: the border keeps saying
-  // whether the connection is up, and only the dot turns amber to mark recency.
-  const dotColor = active ? color : last ? AMBER : GREEN;
+  // Connected-at-rest is surfaced ONLY as a tiny trailing check icon — never a border or
+  // glow. A configured-but-idle provider keeps the same neutral frame as an idle node, so a
+  // graph full of connected nodes stays clean instead of drowning in colored outlines. The
+  // icon is the same success green as `active`, but the shape (static check vs. animated
+  // pulse) is what tells "healthy at rest" apart from "live traffic".
+  const HEALTHY = FLOW_EDGE_COLORS.active;
+  // "Last routed" is a traffic annotation, not a health state: only the dot turns amber to
+  // mark recency. (error is handled by StatusDot's own override.)
+  const dotColor = active ? color : AMBER;
 
   return (
     <div
       className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border-2 transition-all duration-300 bg-bg"
       style={{
-        borderColor: error ? RED : active ? color : healthy ? GREEN : "var(--color-border)",
-        boxShadow: error
-          ? `0 0 12px ${RED}30`
-          : active
-            ? `0 0 12px ${color}30`
-            : healthy
-              ? `0 0 10px ${GREEN}20`
-              : "none",
+        // Healthy shares the idle neutral border on purpose — connection health is shown by
+        // the trailing icon, not by tinting the frame. Only active/error color the border.
+        borderColor: error ? RED : active ? color : "var(--color-border)",
+        boxShadow: error ? `0 0 12px ${RED}30` : active ? `0 0 12px ${color}30` : "none",
         minWidth: "136px",
       }}
     >
@@ -106,15 +107,29 @@ function ProviderNode({ data }: { data: ProviderNodeData }) {
       <span
         className="text-xs font-medium truncate flex-1"
         style={{
-          color: active ? color : error ? RED : healthy ? GREEN : "var(--color-text-main)",
+          color: active ? color : error ? RED : "var(--color-text-main)",
         }}
       >
         {label}
       </span>
 
-      {(active || error || healthy || last) && (
+      {/*
+        Indicator precedence mirrors border/label: a live pulse (active) or error dot is the
+        loud signal; recency shows a static amber dot; a healthy-at-rest connection gets only
+        a small, static green check glyph so a fully-connected graph reads calm, not busy —
+        the check shape + lack of pulse keep it distinct from the animated active dot.
+      */}
+      {active || error || last ? (
         <StatusDot color={dotColor} error={error} pulse={active || error} />
-      )}
+      ) : healthy ? (
+        <span
+          className="material-symbols-outlined shrink-0 leading-none"
+          style={{ color: HEALTHY, fontSize: "14px" }}
+          aria-hidden
+        >
+          check_circle
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -216,9 +231,7 @@ function buildLayout(
       return 4;
     };
     const d = rank(a) - rank(b);
-    return d !== 0
-      ? d
-      : a.provider.toLowerCase().localeCompare(b.provider.toLowerCase()); // ASCII kasıtlı
+    return d !== 0 ? d : a.provider.toLowerCase().localeCompare(b.provider.toLowerCase()); // ASCII kasıtlı
   });
 
   let provIdx = 0;

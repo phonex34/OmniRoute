@@ -4,6 +4,7 @@ import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
 
 import { Card } from "@/shared/components";
+import { STATUS_HEX } from "@/shared/constants/statusColors";
 
 const ProviderTopology = dynamic(() => import("../home/ProviderTopology"), { ssr: false });
 
@@ -53,6 +54,16 @@ export function HomeProviderTopologySection({
           <span className="flex items-center gap-1.5">
             <span className="size-2 rounded-full bg-green-500" />
             {tCommon("active")}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="material-symbols-outlined leading-none"
+              style={{ color: STATUS_HEX.success, fontSize: "14px" }}
+              aria-hidden
+            >
+              check_circle
+            </span>
+            {tCommon("connected")}
           </span>
           <span className="flex items-center gap-1.5">
             <span className="size-2 rounded-full bg-amber-500" />
