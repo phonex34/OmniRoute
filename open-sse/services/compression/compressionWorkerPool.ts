@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { CompressionResult } from "./types.ts";
 import type { StackedCompressionStep } from "./strategySelector.ts";
@@ -14,12 +14,48 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
-function workerUrl(): URL {
-  const dir = dirname(fileURLToPath(import.meta.url));
-  for (const name of ["compressionWorker.js", "compressionWorker.ts"]) {
-    if (existsSync(join(dir, name))) return new URL(name, import.meta.url);
+/**
+ * Resolve the worker entry across dev/prod WITHOUT `new URL(x, import.meta.url)`: webpack
+ * treats that form as a static build-time dependency and fails the build outright
+ * ("Can't resolve 'compressionWorker.js'") because only the .ts source exists at build
+ * time — the .js is esbuild'd later (colocate-standalone.mjs / prepublish.ts). Same
+ * constraint as engines/llmlingua/worker.ts: import.meta.url is frozen to the build
+ * machine in the standalone bundle, so probe plain-string paths from runtime anchors.
+ * Exported for tests.
+ */
+export function resolveCompressionWorkerFile(): {
+  workerFile: string;
+  execArgv: string[];
+} {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const argvDir =
+    typeof process.argv[1] === "string" && process.argv[1] ? dirname(process.argv[1]) : null;
+  const workerRel = join("open-sse", "services", "compression", "compressionWorker.js");
+
+  // Prod (.js runs natively): esbuild'd worker colocated at <installRoot>/open-sse/
+  // services/compression/compressionWorker.js — adjacent to the bundled module (npm dist),
+  // or under the install root reached from cwd / the entry-script dir (Next standalone,
+  // Electron standalone).
+  const jsCandidates = [
+    join(moduleDir, "compressionWorker.js"),
+    join(process.cwd(), workerRel),
+    ...(argvDir ? [join(argvDir, workerRel)] : []),
+  ];
+  for (const candidate of jsCandidates) {
+    if (existsSync(candidate)) return { workerFile: candidate, execArgv: [] };
   }
-  return new URL("compressionWorker.js", import.meta.url);
+
+  // Dev (tsx): the .ts source beside this module, then under cwd; needs the tsx loader.
+  for (const candidate of [
+    join(moduleDir, "compressionWorker.ts"),
+    join(process.cwd(), "open-sse", "services", "compression", "compressionWorker.ts"),
+  ]) {
+    if (existsSync(candidate)) return { workerFile: candidate, execArgv: ["--import", "tsx/esm"] };
+  }
+
+  // Nothing found — return the adjacent .js path; the spawn fails open (pool resolves
+  // the job with the unchanged body).
+  return { workerFile: jsCandidates[0], execArgv: [] };
 }
 function unchanged(body: Record<string, unknown>): CompressionResult {
   return { body, compressed: false, stats: null };
@@ -78,8 +114,9 @@ export class CompressionWorkerPool {
     await Promise.all([...this.workers].map((slot) => this.remove(slot, true)));
   }
   private spawn(): PoolWorker {
+    const { workerFile, execArgv } = resolveCompressionWorkerFile();
     const slot: PoolWorker = {
-      worker: new Worker(workerUrl()),
+      worker: new Worker(pathToFileURL(workerFile), { execArgv }),
       job: null,
       timeout: null,
       idle: null,
