@@ -73,6 +73,85 @@ function initAliases(): Record<string, string> {
   return _aliases;
 }
 
+// Reverse index alias→provider id, derived from PROVIDER_ID_TO_ALIAS so the two
+// cannot drift. Lazy like initAliases(): the registry is built on first touch.
+//
+// Lives here, beside its source map, rather than in services/model.ts — that
+// module reaches @/lib/db/readCache via `await import()`, and webpack keeps
+// dynamic imports in the graph, so any client component importing it pulls in
+// ioredis/sharp and fails to compile (`Can't resolve 'net'|'dns'|'fs'`).
+// This file is already client-safe (src/shared/constants/models.ts re-exports it
+// to ModelSelectModal and friends), so alias resolution is usable on both sides.
+let _aliasToProviderId: Record<string, string> | null = null;
+function initAliasToProviderId(): Record<string, string> {
+  if (_aliasToProviderId) return _aliasToProviderId;
+  const map: Record<string, string> = {};
+  for (const [id, alias] of Object.entries(initAliases())) {
+    if (map[alias]) {
+      console.log(
+        `[MODEL] Warning: alias "${alias}" maps to both "${map[alias]}" and "${id}". Using "${id}".`
+      );
+    }
+    map[alias] = id;
+  }
+  // Manual alias overrides — maps slug-style prefixes to canonical provider IDs.
+  // These live outside the registry because they represent multiple providers
+  // or backward-compatible slug changes, not a single provider's display name.
+  // opencode/ → opencode-zen (the main free/open tier; opencode-go is a separate paid tier)
+  map["opencode"] = "opencode-zen";
+  // xiaomi/ is the user-visible prefix for MiMo models; register it so
+  // parseModel("xiaomi/mimo-v2-flash") resolves provider = "xiaomi-mimo" instead
+  // of falling through to the identity fallback ("xiaomi").
+  map["xiaomi"] = "xiaomi-mimo";
+  // llamacpp/ is the user-visible alias for the llama-cpp self-hosted provider.
+  // The canonical ID is "llama-cpp" (with a hyphen), but the catalog and user-facing
+  // prefix is "llamacpp". Register it so parseModel("llamacpp/<model>") resolves
+  // provider = "llama-cpp" instead of the identity fallback ("llamacpp").
+  map["llamacpp"] = "llama-cpp";
+  // agy/ is the short alias for antigravity provider.
+  map["agy"] = "antigravity";
+  // aq/ is the user-visible prefix for the Amazon Q (AWS Builder ID) provider.
+  // The canonical provider ID is "amazon-q". Register it so parseModel("aq/<model>")
+  // resolves provider = "amazon-q" instead of falling through to the identity fallback.
+  map["aq"] = "amazon-q";
+  _aliasToProviderId = map;
+  return map;
+}
+
+/**
+ * Alias→provider-id lookup. A function, not a Proxy like PROVIDER_ID_TO_ALIAS:
+ * every reader does a plain `get(x) || x`, so `has`/`ownKeys`/`set` would be
+ * dead machinery here.
+ */
+export function getProviderIdForAlias(alias: string): string | undefined {
+  return initAliasToProviderId()[alias];
+}
+
+/**
+ * Resolve provider alias to provider ID
+ */
+export function resolveProviderAlias(aliasOrId: string | null | undefined): string | null {
+  if (typeof aliasOrId !== "string") return null;
+  // Follow the alias chain transitively so intermediate alias-only hops resolve
+  // to the final target, but STOP as soon as a hop lands on a registered
+  // provider id (#2901): "oc" must resolve to the no-auth "opencode" provider,
+  // NOT continue through the manual "opencode" → "opencode-zen" slug override —
+  // that override is for user-typed `opencode/` prefixes only. Without this
+  // boundary the no-auth provider becomes unreachable by any prefix.
+  // Guarded against infinite loops with both a depth limit and a seen-set.
+  let current = aliasOrId;
+  const seen = new Set<string>();
+  for (let i = 0; i < 10; i++) {
+    const next = getProviderIdForAlias(current);
+    if (!next || next === current) return current;
+    if (next in PROVIDER_ID_TO_ALIAS) return next;
+    if (seen.has(next)) return next;
+    seen.add(next);
+    current = next;
+  }
+  return current;
+}
+
 // Helper functions
 export function getProviderModels(aliasOrId: string): RegistryModel[] {
   // Accept either the public alias (the /v1/models prefix, e.g. "gh") or the raw
