@@ -22,6 +22,7 @@ export function WebhooksPageClient() {
   const [webhooks, setWebhooks] = useState<WebhookItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [sendingUsageId, setSendingUsageId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<WebhookItem | null>(null);
@@ -77,6 +78,28 @@ export function WebhooksPageClient() {
       });
     } finally {
       setTestingId(null);
+    }
+  };
+
+  const handleSendUsage = async (wh: WebhookItem) => {
+    setSendingUsageId(wh.id);
+    setFeedback(null);
+    try {
+      const res = await fetch(`/api/webhooks/${wh.id}/send-usage`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.delivered === false) throw new Error(data.error || t("sendUsageFailed"));
+      setFeedback({
+        type: "success",
+        message: t("sendUsageSuccess", { count: data.accountCount ?? 0 }),
+      });
+      await load();
+    } catch (err) {
+      setFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : t("sendUsageFailed"),
+      });
+    } finally {
+      setSendingUsageId(null);
     }
   };
 
@@ -154,7 +177,7 @@ export function WebhooksPageClient() {
         </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
         <div className="space-y-6">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {[
@@ -218,8 +241,10 @@ export function WebhooksPageClient() {
                 webhooks={webhooks}
                 loading={loading}
                 testingId={testingId}
+                sendingUsageId={sendingUsageId}
                 t={tFn}
                 onTest={(wh) => void handleTest(wh)}
+                onSendUsage={(wh) => void handleSendUsage(wh)}
                 onToggleEnabled={(wh) => void handleToggleEnabled(wh)}
                 onEdit={() => setWizardOpen(true)}
                 onDelete={setDeleteTarget}

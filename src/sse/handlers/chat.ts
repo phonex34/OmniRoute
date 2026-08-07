@@ -19,6 +19,10 @@ import {
 } from "@omniroute/open-sse/services/accountFallback.ts";
 import { getModelInfo, getComboForModel } from "../services/model";
 import { resolveBareModelToConnectionDefault } from "@omniroute/open-sse/services/model.ts";
+import {
+  splitThinkingSuffix,
+  THINKING_SUFFIX_MARKER,
+} from "@omniroute/open-sse/handlers/chatCore/thinkingSuffixVariant.ts";
 import { errorResponse } from "@omniroute/open-sse/utils/error.ts";
 import { getImageModelEntry } from "@omniroute/open-sse/config/imageRegistry.ts";
 import { acceptHeaderForcesStream } from "@omniroute/open-sse/utils/aiSdkCompat.ts";
@@ -26,6 +30,9 @@ import { applyNoThinkingAlias } from "@omniroute/open-sse/utils/noThinkingAlias.
 import { resolveCcDiscoveryAliasStrip } from "@/lib/ccDiscoveryAliasResolve";
 import { handleComboChat, shouldSkipConnDisable } from "@omniroute/open-sse/services/combo.ts";
 import { mergeAbortSignals } from "@omniroute/open-sse/executors/base.ts";
+import { parseModel } from "@omniroute/open-sse/services/model.ts";
+import { notifyWebhookEvent } from "@/lib/webhookDispatcher";
+import { recordFailureForNotify } from "@/lib/webhooks/failureNotificationDedup";
 import { resolveRequestAutoControls } from "@omniroute/open-sse/services/autoCombo/requestControls.ts";
 import { resolveComboConfig } from "@omniroute/open-sse/services/comboConfig.ts";
 import { injectHandoffIntoBody } from "@omniroute/open-sse/services/contextHandoff.ts";
@@ -618,6 +625,20 @@ export async function handleChat(
     }
   }
 
+  // ── Thinking-suffix (Point 1): strip a `(high)`/`(auto)`/`(16384)` suffix off the
+  // model/pool name BEFORE combo/auto lookup (getComboByName matches exact names, so a
+  // suffixed pool name would miss its combo). The raw suffix is stashed on the body via
+  // THINKING_SUFFIX_MARKER and re-applied per-target in chatCore (Point 2), so every
+  // target in a pool — each possibly a different provider — gets its own thinking config.
+  {
+    const { baseModel, rawSuffix } = splitThinkingSuffix(resolvedModelStr);
+    if (rawSuffix) {
+      resolvedModelStr = baseModel;
+      body = { ...body, model: baseModel, [THINKING_SUFFIX_MARKER]: rawSuffix };
+      log.info("THINKING-SUFFIX", `stripped "(${rawSuffix})" → ${baseModel} (stashed for targets)`);
+    }
+  }
+
   // Explicit reasoning-routing policies are the final model-routing layer before
   // combo/provider resolution. Existing behavior is untouched when no rule matches.
   let reasoningDecision: ReasoningRuleDecision | null = null;
@@ -968,6 +989,28 @@ export async function handleChat(
     false
   );
   recordTelemetry(telemetry);
+  // Non-combo request.failed webhook. This is the single non-combo choke point
+  // (the combo branch returns above at the combo dispatch), so there is no
+  // double-fire with combo.ts's own webhook. Fires only on a genuine upstream
+  // failure (>=400, excluding client-abort 499); mid-stream drops that start
+  // 200 are out of scope, matching the combo path. Deduped + best-effort.
+  try {
+    if (!response.ok && response.status !== 499) {
+      const parsed = parseModel(resolvedModelStr);
+      const provider = parsed.provider || parsed.providerAlias || "unknown";
+      const { shouldNotify, count } = recordFailureForNotify("(single)", provider, response.status);
+      if (shouldNotify) {
+        notifyWebhookEvent("request.failed", {
+          provider,
+          model: resolvedModelStr,
+          status: response.status,
+          failureCount: count,
+        });
+      }
+    }
+  } catch {
+    /* webhook is best-effort */
+  }
   return withCorrelationId(withSessionHeader(response, sessionId), reqId);
 }
 
