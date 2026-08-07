@@ -185,6 +185,21 @@ test("updateProviderNodeSchema accepts non-reserved prefix", () => {
   assert.equal(result.success, true);
 });
 
+test("updateProviderNodeSchema accepts an omitted or empty prefix (prefix now optional)", () => {
+  const omitted = updateProviderNodeSchema.safeParse({
+    name: "Renamed",
+    baseUrl: "https://renamed.example.com/v1",
+  });
+  assert.equal(omitted.success, true);
+
+  const empty = updateProviderNodeSchema.safeParse({
+    name: "Renamed",
+    prefix: "",
+    baseUrl: "https://renamed.example.com/v1",
+  });
+  assert.equal(empty.success, true);
+});
+
 // ──── Route-level guard (POST /api/provider-nodes) ────
 
 test("provider nodes route returns 400 with prefix issue for reserved prefix", async () => {
@@ -256,4 +271,29 @@ test("provider nodes update route rejects renaming prefix to a reserved one", as
   assert.equal(after.status, 200);
   const afterBody = asNodeBody(await after.json());
   assert.equal(afterBody.node?.prefix, "original-prefix");
+});
+
+test("provider nodes update route keeps existing prefix when prefix is omitted", async () => {
+  const createResponse = await providerNodesRoute.POST(
+    makeCreateRequest({
+      name: "Prefix Keeper",
+      prefix: "keep-me",
+      apiType: "chat",
+      baseUrl: "https://keep.example.com/v1",
+    })
+  );
+  const created = asNodeBody(await createResponse.json());
+  const nodeId = created.node?.id ?? "";
+
+  const updateResponse = await providerNodesIdRoute.PUT(
+    makeUpdateRequest(nodeId, {
+      name: "Renamed, No Prefix Sent",
+      apiType: "chat",
+      baseUrl: "https://keep.example.com/v1",
+    }),
+    { params: Promise.resolve({ id: nodeId }) }
+  );
+  assert.equal(updateResponse.status, 200);
+  const body = asNodeBody(await updateResponse.json());
+  assert.equal(body.node?.prefix, "keep-me");
 });

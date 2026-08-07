@@ -90,7 +90,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
     const updates: Record<string, unknown> = {
       name: name.trim(),
-      prefix: prefix.trim(),
+      prefix: prefix?.trim() || node.prefix,
       baseUrl: sanitizedBaseUrl,
       chatPath: chatPath || null,
       modelsPath: isClaudeCodeCompatibleProvider(id) ? null : modelsPath || null,
@@ -115,7 +115,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
         const providerSpecificData = {
           ...asRecord(connection.providerSpecificData),
-          prefix: prefix.trim(),
+          prefix: updated.prefix,
           baseUrl: sanitizedBaseUrl,
           nodeName: updated.name,
           chatPath: updated.chatPath || undefined,
