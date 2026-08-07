@@ -5,6 +5,7 @@ import {
 } from "@omniroute/open-sse/config/antigravityUpstream.ts";
 import {
   CODEBUDDY_CN_USER_AGENT,
+  CURSOR_AGENT_CLI_VERSION,
   GITHUB_COPILOT_API_VERSION,
   GITHUB_COPILOT_CHAT_PLUGIN_VERSION,
   GITHUB_COPILOT_CHAT_USER_AGENT,
@@ -20,7 +21,6 @@ import {
   GROK_BUILD_TOKEN_URL,
 } from "@omniroute/open-sse/config/grokBuild.ts";
 import { resolvePublicCred } from "@omniroute/open-sse/utils/publicCreds.ts";
-import { CURSOR_AGENT_CLI_VERSION } from "@omniroute/open-sse/utils/cursorAgentCliVersion.ts";
 import { buildGitLabOAuthEndpoints, GITLAB_DUO_DEFAULT_BASE_URL } from "../gitlab";
 
 /**
@@ -375,7 +375,8 @@ export const KIRO_CONFIG = {
 // Cursor stores credentials in SQLite database: state.vscdb
 // Keys: cursorAuth/accessToken, cursorAuth/refreshToken, storage.serviceMachineId
 // Deep-control PKCE + refresh aligned with OpenCodex (lidge-jun/opencodex src/oauth/cursor.ts).
-// clientVersion pin lives in open-sse/utils/cursorAgentCliVersion.ts — single source of truth.
+// clientVersion pin lives in open-sse/config/providerHeaderProfiles.ts — single
+// source of truth, beside the other client-identity version pins.
 export const CURSOR_CONFIG = {
   // API endpoints
   apiEndpoint: "https://api2.cursor.sh",

@@ -66,6 +66,23 @@ export function getGitHubCopilotMachineId(): string {
 export const QWEN_CLI_VERSION = "0.19.3";
 export const QWEN_STAINLESS_LANG = "js";
 
+/**
+ * Pinned Cursor Agent CLI build id — the fallback used when no local install is
+ * detected (typical headless OmniRoute). Wire header:
+ * `x-cursor-client-version: cli-${id}`.
+ *
+ * Lives here with the other client-identity pins rather than in
+ * `utils/cursorAgentCliVersion.ts`: that module imports node:fs/os/path for
+ * install detection and disk caching, and `src/lib/oauth/constants/oauth.ts`
+ * needs only this string — it is client-reachable via
+ * providerRegistry → cliTools → CliAgentsPageClient, so importing the resolver
+ * there breaks the webpack build with `UnhandledSchemeError: node:fs`.
+ * `cursorAgentCliVersion.ts` re-exports this; there is no second copy to drift.
+ *
+ * Bump when refreshing Cursor CLI impersonation.
+ */
+export const CURSOR_AGENT_CLI_VERSION = "2026.07.08-0c04a8a";
+
 export const QODER_DEFAULT_USER_AGENT = "Qoder-Cli";
 
 // CODEBUDDY_CN_USER_AGENT is the single source of truth for the CLI/CodeBuddy version
