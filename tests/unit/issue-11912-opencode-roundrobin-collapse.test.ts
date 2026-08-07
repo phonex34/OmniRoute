@@ -9,7 +9,7 @@ import { parseModel } from "../../open-sse/services/model.ts";
 // dynamic no-auth) targets plus one "opencode-zen" (authenticated api-key)
 // target routed 100% of upstream traffic to the opencode-zen connection.
 //
-// Root cause: open-sse/services/model.ts's manual ALIAS_TO_PROVIDER_ID
+// Root cause: open-sse/services/providerAlias.ts's manual ALIAS_TO_PROVIDER_ID
 // override canonicalizes ANY "opencode/<model>" string to provider
 // "opencode-zen" before dispatch, so every declared "opencode/<model>"
 // combo target and the explicit "opencode-zen/<model>" target resolved to
@@ -61,8 +61,14 @@ test("issue #11912: round-robin combo keeps opencode and opencode-zen targets on
 test("resolveComboTargetModelStr rewrites the ambiguous opencode/ prefix to oc/", () => {
   assert.equal(resolveComboTargetModelStr("opencode/mimo-v2.5-free"), "oc/mimo-v2.5-free");
   // Siblings and the explicit api-key gateway must pass through untouched.
-  assert.equal(resolveComboTargetModelStr("opencode-zen/mimo-v2.5-free"), "opencode-zen/mimo-v2.5-free");
-  assert.equal(resolveComboTargetModelStr("opencode-go/mimo-v2.5-free"), "opencode-go/mimo-v2.5-free");
+  assert.equal(
+    resolveComboTargetModelStr("opencode-zen/mimo-v2.5-free"),
+    "opencode-zen/mimo-v2.5-free"
+  );
+  assert.equal(
+    resolveComboTargetModelStr("opencode-go/mimo-v2.5-free"),
+    "opencode-go/mimo-v2.5-free"
+  );
   assert.equal(resolveComboTargetModelStr("oc/mimo-v2.5-free"), "oc/mimo-v2.5-free");
   // Non-slashed / non-opencode strings are untouched.
   assert.equal(resolveComboTargetModelStr("bare-model"), "bare-model");
