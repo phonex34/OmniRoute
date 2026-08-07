@@ -17,7 +17,8 @@ import { buildUsageReportFromCache } from "@/lib/usage/providerLimits";
 import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { insertDelivery } from "@/lib/db/webhookDeliveries";
 import { recordWebhookDelivery } from "@/lib/localDb";
-import { parseAndValidateWebhookUrl, isPrivateHost } from "@/shared/network/outboundUrlGuard";
+import { isPrivateHost } from "@/shared/network/outboundUrlGuard";
+import { parseAndValidateWebhookUrl } from "@/shared/network/outboundUrlGuardPolicy";
 import crypto from "crypto";
 
 const MAX_RESPONSE_BODY = 2048;
