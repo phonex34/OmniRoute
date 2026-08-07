@@ -1,15 +1,21 @@
 /**
- * Persist a runtime-discovered Antigravity projectId back onto its connection row
- * (#8491).
+ * Read/write helpers for the Antigravity `projectId` stored on a connection row
+ * (#8491, #8894).
  *
  * `ensureAntigravityProjectAssigned()` recovers a missing projectId via a
  * `loadCodeAssist` round-trip and hands it back to the caller for the in-flight
  * request only — nothing wrote it back to the connection record, so every
  * subsequent token refresh (or process restart) lost the discovery and forced a
- * fresh round-trip. This module is the single best-effort write path both call
- * sites (`open-sse/executors/antigravity.ts` and the models-discovery
- * normalizer) funnel through, mirroring the shape `mapAntigravityTokens()`
- * already persists at OAuth-exchange time (`src/lib/oauth/providers/antigravity.ts`).
+ * fresh round-trip. `persistDiscoveredAntigravityProjectId()` is the single
+ * best-effort write path both call sites (`open-sse/executors/antigravity.ts`
+ * and the models-discovery normalizer) funnel through, mirroring the shape
+ * `mapAntigravityTokens()` already persists at OAuth-exchange time
+ * (`src/lib/oauth/providers/antigravity.ts`).
+ *
+ * `preferAntigravityConnectionsWithStoredProject()` is the read-side counterpart
+ * used by reset-aware combo routing: a connection with no stored projectId costs
+ * an extra `loadCodeAssist` round-trip on first use, so it is deprioritised out
+ * of the quota-aware pool whenever a fully-provisioned sibling exists.
  */
 
 import { updateProviderConnection } from "@/lib/db/providers";
