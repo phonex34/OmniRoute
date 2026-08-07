@@ -66,3 +66,14 @@ test("quota_pools lives at 085 (renumbered from the 077 collision)", () => {
   assert.ok(streamDefault, "api_key_stream_default_mode migration must exist");
   assert.equal(streamDefault.version, "077", "api_key_stream_default_mode stays at 077");
 });
+
+test("ccr_blocks lives at 139 (renumbered from the 134 collision)", () => {
+  const files = migrationFiles();
+  const ccrBlocks = files.find((f) => f.name === "ccr_blocks");
+  assert.ok(ccrBlocks, "ccr_blocks migration must exist");
+  assert.equal(ccrBlocks.version, "139", "ccr_blocks must be renumbered to 139");
+  // proxy_logs_egress_ip was the incumbent at 134 (#9291) and keeps the slot.
+  const egressIp = files.find((f) => f.name === "proxy_logs_egress_ip");
+  assert.ok(egressIp, "proxy_logs_egress_ip migration must exist");
+  assert.equal(egressIp.version, "134", "proxy_logs_egress_ip stays at 134");
+});

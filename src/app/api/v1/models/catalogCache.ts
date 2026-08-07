@@ -12,6 +12,7 @@
  * Auth rejection is NOT handled here and must stay in the caller: it depends on
  * live per-request state (dashboard cookie, API key) and must never be cached.
  */
+import { after } from "next/server";
 import { getModelCatalogCacheVersion } from "@/lib/db/readCache";
 import { extractApiKey } from "@/sse/services/auth";
 
@@ -32,14 +33,28 @@ export type CatalogPayload = {
   cacheTTL: number;
 };
 
+export type CatalogRefreshTask = () => Promise<void>;
+export type CatalogRefreshScheduler = (task: CatalogRefreshTask) => void;
+
 /**
- * A client with a short discovery timeout (Claude Code allows 3 s) must never
- * wait on a full rebuild. Once a cached 200 expires it is still served
- * immediately for up to this long while a background refresh repopulates it.
- * Bounded so a refresh that keeps failing cannot pin an old catalog forever —
- * past this window callers fall back to waiting, same as a cold cache.
+ * Injection seam for the two environment-dependent parts of the cache policy:
+ * how long a stale snapshot stays servable, and how a background refresh is
+ * scheduled. Production leaves both undefined and gets the module defaults.
  */
-export const CATALOG_STALE_WHILE_REVALIDATE_MS = 30_000;
+export type CatalogCachePolicy = {
+  getStaleWhileRevalidateMs?: () => number;
+  scheduleBackgroundRefresh?: CatalogRefreshScheduler;
+};
+
+/**
+ * Production stale-while-revalidate window.
+ *
+ * A successful snapshot remains eligible indefinitely after the 60-second fresh TTL.
+ * TTL expiry requests return that last success and schedule one refresh. Database state
+ * changes are different: the version signal below hard-invalidates every snapshot and
+ * makes the next request await a current-generation build.
+ */
+export const CATALOG_STALE_WHILE_REVALIDATE_MS = Number.POSITIVE_INFINITY;
 
 /**
  * Fallback memoization window; overridden by `settings.cache.modelCatalogCacheTtlMs`.
@@ -84,6 +99,25 @@ type InFlightBuild = { generation: number; promise: Promise<CachedCatalog> };
 const catalogInFlight = new Map<string, InFlightBuild>();
 
 let _catalogBuilderRuns = 0;
+
+let staleWhileRevalidateMsAccessor = () => CATALOG_STALE_WHILE_REVALIDATE_MS;
+
+/** Current SWR policy value; production defaults to unbounded stale serving. */
+export function getCatalogStaleWhileRevalidateMs(): number {
+  return staleWhileRevalidateMsAccessor();
+}
+
+function defaultBackgroundRefreshScheduler(task: CatalogRefreshTask): void {
+  // All production routes run in Next.js request context, so `after()` defers the
+  // refresh until the response has flushed — a synchronous builder therefore cannot
+  // pin the event loop while the client is still reading the stale body. Direct
+  // test/startup callers have no request store and need a safe fallback.
+  try {
+    after(task);
+  } catch {
+    setImmediate(() => void task());
+  }
+}
 
 function buildCatalogCacheKey(
   request: Request,
@@ -156,7 +190,14 @@ function storePayload(
     status: payload.status,
     expiresAt: Date.now() + payload.cacheTTL,
   };
-  if (buildGeneration === getModelCatalogCacheVersion()) {
+  // Never cache a non-2xx build: replaying it as a "stale" hit would mask an
+  // intermittent upstream failure behind a fake success until the TTL lapsed.
+  // The entry is still returned so the caller answers this request with it.
+  if (
+    payload.status >= 200 &&
+    payload.status < 300 &&
+    buildGeneration === getModelCatalogCacheVersion()
+  ) {
     catalogCache.set(cacheKey, entry);
   }
   return entry;
@@ -182,38 +223,52 @@ function storePayload(
 function scheduleBackgroundRefresh(
   cacheKey: string,
   request: Request,
-  buildPayload: (request: Request) => Promise<CatalogPayload>
+  buildPayload: (request: Request) => Promise<CatalogPayload>,
+  schedule: CatalogRefreshScheduler
 ): void {
   if (catalogInFlight.has(cacheKey)) return; // a refresh for this key is already running
 
   const generation = getModelCatalogCacheVersion();
-  const refreshPromise: Promise<CachedCatalog> = new Promise((resolve, reject) => {
-    setTimeout(() => {
-      runBuilder(buildPayload, request)
-        .then((payload) => resolve(storePayload(cacheKey, payload, generation)))
-        .catch((err) => {
-          console.error(
-            `[catalog] Background stale-while-revalidate refresh failed for key "${cacheKey}":`,
-            err
-          );
-          reject(err);
-        });
-    }, 0);
+  let resolveRefresh!: (entry: CachedCatalog) => void;
+  let rejectRefresh!: (error: unknown) => void;
+  const refreshPromise = new Promise<CachedCatalog>((resolve, reject) => {
+    resolveRefresh = resolve;
+    rejectRefresh = reject;
   });
-  inFlight = { version: lastSeenCatalogCacheVersion, promise };
+
+  // Reserve the key before handing the task to the scheduler so multiple stale reads
+  // in the same request turn cannot enqueue duplicate refreshes.
+  catalogInFlight.set(cacheKey, { generation, promise: refreshPromise });
 
   // Nobody on the stale path awaits this, so pre-handle the rejection; a cold-path
   // caller that joins it via catalogInFlight attaches its own handler and still
   // observes the failure.
-  promise.catch(() => {});
+  refreshPromise.catch(() => {});
 
-  catalogInFlight.set(cacheKey, { generation, promise: refreshPromise });
-  refreshPromise
-    .catch(() => {})
-    .finally(() => {
-      if (catalogInFlight.get(cacheKey)?.promise === refreshPromise)
-        catalogInFlight.delete(cacheKey);
-    });
+  schedule(async () => {
+    // A hard invalidation or a deterministic test reset can detach this task before
+    // it starts; rebuilding then would repopulate a cache the caller just cleared.
+    if (catalogInFlight.get(cacheKey)?.promise !== refreshPromise) return;
+    try {
+      const entry = storePayload(cacheKey, await runBuilder(buildPayload, request), generation);
+      releaseInFlight();
+      resolveRefresh(entry);
+    } catch (err) {
+      console.error(
+        `[catalog] Background stale-while-revalidate refresh failed for key "${cacheKey}":`,
+        err
+      );
+      // Release before rejecting, and synchronously: a caller that awaits this task
+      // must observe the key freed so the next stale read can enqueue a retry rather
+      // than short-circuiting on a dead reservation.
+      releaseInFlight();
+      rejectRefresh(err);
+    }
+  });
+
+  function releaseInFlight(): void {
+    if (catalogInFlight.get(cacheKey)?.promise === refreshPromise) catalogInFlight.delete(cacheKey);
+  }
 }
 
 function runBuilder(
@@ -235,11 +290,13 @@ export async function resolveCachedCatalogResponse(
   request: Request,
   headerSources: { corsHeaders: Record<string, string>; diagnosticHeaders: Record<string, string> },
   buildPayload: (request: Request) => Promise<CatalogPayload>,
+  policy: CatalogCachePolicy = {},
   catalogSettings?: { hideAutoCombos?: boolean; hideNoThinkVariants?: boolean }
 ): Promise<Response> {
   const { corsHeaders, diagnosticHeaders } = headerSources;
   dropCatalogCacheIfStateChanged();
 
+  const schedule = policy.scheduleBackgroundRefresh ?? defaultBackgroundRefreshScheduler;
   const cacheKey = buildCatalogCacheKey(request, catalogSettings);
   const now = Date.now();
   const cached = catalogCache.get(cacheKey);
@@ -259,9 +316,10 @@ export async function resolveCachedCatalogResponse(
   if (
     cached &&
     cached.status === 200 &&
-    now - cached.expiresAt <= CATALOG_STALE_WHILE_REVALIDATE_MS
+    now - cached.expiresAt <=
+      (policy.getStaleWhileRevalidateMs?.() ?? getCatalogStaleWhileRevalidateMs())
   ) {
-    scheduleBackgroundRefresh(cacheKey, request, buildPayload);
+    scheduleBackgroundRefresh(cacheKey, request, buildPayload, schedule);
     return new Response(cached.body, {
       status: cached.status,
       headers: mergeCatalogHeaders(corsHeaders, cached.headers, diagnosticHeaders),
@@ -301,6 +359,17 @@ export function __resetCatalogBuilderRunsForTest(): void {
   catalogCache.clear();
   catalogInFlight.clear();
   lastSeenCatalogCacheVersion = getModelCatalogCacheVersion();
+  staleWhileRevalidateMsAccessor = () => CATALOG_STALE_WHILE_REVALIDATE_MS;
+}
+
+/** Injects the SWR policy accessor without environment-dependent behavior. */
+export function __setCatalogStaleWhileRevalidateAccessorForTest(accessor: () => number): void {
+  staleWhileRevalidateMsAccessor = accessor;
+}
+
+/** Backward-compatible scalar policy hook retained for focused tests. */
+export function __setCatalogStaleWhileRevalidateMsForTest(ms: number): void {
+  staleWhileRevalidateMsAccessor = () => ms;
 }
 
 /** Counts full builder executions — proves concurrent requests share one run (#6408). */
