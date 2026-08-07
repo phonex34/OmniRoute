@@ -6,6 +6,11 @@ import { getRegisteredProviderEffortBaseModelId } from "../utils/registeredEffor
 import { hasProviderModelAlias, resolveProviderModelAlias } from "./modelCanonicalization.ts";
 import { resolveActivePrefixedProviderModel } from "./prefixedProviderModel.ts";
 
+// Alias resolution lives in `services/providerAlias.ts`. It must NOT move back
+// here: this file reaches `@/lib/db/readCache` via `await import()`, which keeps
+// ioredis/sharp in any importer's module graph and breaks the client build for
+// components that only need alias resolution.
+// Re-exported so existing server-side importers of `model.ts` keep working.
 export { resolveProviderAlias };
 export { resolveCanonicalProviderModel } from "./modelCanonicalization.ts";
 
@@ -32,6 +37,7 @@ export function stripContextWindowSuffix(
   if (typeof modelStr !== "string" || !modelStr) return modelStr;
   return modelStr.replace(CONTEXT_WINDOW_SUFFIX_RE, "").trimEnd();
 }
+
 
 const CROSS_PROXY_MODEL_ALIASES: Record<string, string> = {
   "gpt-oss:120b": "gpt-oss-120b",
@@ -553,8 +559,8 @@ async function resolveModelByProviderInference(modelId: string, extendedContext:
   //
   // A literal `activeProviders?.has("opencode")` check is unreachable in
   // practice: `getActiveProviderSet()` canonicalizes every connection's
-  // provider id through `resolveProviderAlias()`, and the manual override
-  // above (`ALIAS_TO_PROVIDER_ID["opencode"] = "opencode-zen"`) rewrites any
+  // provider id through `resolveProviderAlias()`, and the manual override in
+  // config/providerModels.ts (`map["opencode"] = "opencode-zen"`) rewrites any
   // "opencode" id to "opencode-zen" before it ever reaches the active set —
   // so an active no-auth opencode connection never appears as "opencode".
   // Check both opencode-family canonical ids that catalog this model id.
