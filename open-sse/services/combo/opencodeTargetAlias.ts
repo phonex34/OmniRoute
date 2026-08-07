@@ -1,6 +1,6 @@
 /**
  * Issue #11912 — a combo step declared with the raw "opencode/<model>" prefix
- * is ambiguous: open-sse/services/model.ts's manual ALIAS_TO_PROVIDER_ID
+ * is ambiguous: open-sse/services/providerAlias.ts's manual ALIAS_TO_PROVIDER_ID
  * override canonicalizes ANY "opencode/<model>" string to provider
  * "opencode-zen" (the api-key gateway) before dispatch. A round-robin combo
  * mixing declared "opencode/<model>" targets (intended as the free/dynamic
