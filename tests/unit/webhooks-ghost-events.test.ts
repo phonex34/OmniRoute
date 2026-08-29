@@ -7,22 +7,26 @@ import {
 } from "../../src/lib/webhooks/eventDescriptions.ts";
 
 describe("webhook catalogue", () => {
-  it("no longer declares provider.error/recovered/combo.switched", () => {
+  it("no longer declares provider.error/recovered as ghost events", () => {
     const keys = Object.keys(EVENT_DESCRIPTIONS);
     assert.equal(keys.includes("provider.error"), false);
     assert.equal(keys.includes("provider.recovered"), false);
-    assert.equal(keys.includes("combo.switched"), false);
-    assert.equal(keys.length, 4); // completed, failed, quota.exceeded, test.ping
+    // combo.switched (combo.ts tier-drop) and usage.report (providerLimits.ts
+    // scheduled sync) are genuinely emitted — not ghosts — so they stay.
+    assert.equal(keys.includes("combo.switched"), true);
+    assert.equal(keys.includes("usage.report"), true);
+    assert.equal(keys.length, 6); // completed, failed, quota.exceeded, usage.report, combo.switched, test.ping
   });
 
   it("rejected legacy events via zod (400)", () => {
     const schema = z.enum(WEBHOOK_EVENT_VALUES as unknown as [string, ...string[]]);
     assert.equal(schema.safeParse("provider.error").success, false);
     assert.equal(schema.safeParse("provider.recovered").success, false);
-    assert.equal(schema.safeParse("combo.switched").success, false);
     assert.equal(schema.safeParse("request.completed").success, true);
     assert.equal(schema.safeParse("request.failed").success, true);
     assert.equal(schema.safeParse("quota.exceeded").success, true);
+    assert.equal(schema.safeParse("usage.report").success, true);
+    assert.equal(schema.safeParse("combo.switched").success, true);
     assert.equal(schema.safeParse("test.ping").success, true);
   });
 

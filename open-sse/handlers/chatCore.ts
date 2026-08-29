@@ -96,6 +96,7 @@ import {
   shouldUseNativeOpenAICompatibleResponsesPassthrough,
   stampNativeResponsesPassthroughBody,
   redactPassthroughThinkingSignatures,
+  sanitizeClaudePassthroughThinkingBlocks,
   isClaudeCodeSemanticPassthroughRequest,
 } from "./chatCore/passthroughHelpers.ts";
 import { recoverAnthropicThinkingSignature } from "./chatCore/thinkingSignatureRecovery.ts";
@@ -115,6 +116,7 @@ export {
   shouldUseNativeCodexPassthrough,
   shouldUseNativeXaiResponsesPassthrough,
   redactPassthroughThinkingSignatures,
+  sanitizeClaudePassthroughThinkingBlocks,
   isClaudeCodeSemanticPassthroughRequest,
   buildStreamingResponseHeaders,
   stripStaleForwardingHeaders,
@@ -170,6 +172,7 @@ import { createPreparedRequestLogger, runWithCapture } from "../utils/providerRe
 import { summarizeToolSources } from "../utils/toolSources.ts";
 import { applyResponsesPreviousResponseIdPolicy } from "../utils/responsesStatePolicy.ts";
 import { applyClaudeEffortVariant } from "./chatCore/claudeEffortVariant.ts";
+import { applyThinkingSuffixVariant } from "./chatCore/thinkingSuffixVariant.ts";
 import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../config/defaultThinkingSignature.ts";
 import {
   getStripTypesForProviderModel,
@@ -375,6 +378,7 @@ import {
   cacheReasoningFromAssistantMessage,
   requiresReasoningReplay,
 } from "../services/reasoningCache.ts";
+import { codexOpaqueResponsesReplayStore } from "../services/codexOpaqueResponsesReplayStore.ts";
 import { sanitizeOpenAITool } from "../services/toolSchemaSanitizer.ts";
 import { isCompactResponsesEndpoint } from "../executors/codex.ts";
 import { persistCodexChildQuotaResponse } from "../services/codexAccount/index.ts";
@@ -873,6 +877,25 @@ export async function handleChatCore({
     nativeCodexPassthrough ||
     nativeXaiResponsesPassthrough ||
     nativeOpenAICompatibleResponsesPassthrough;
+
+  // Thinking-suffix (Point 2): inject provider-native thinking config for THIS target from
+  // a model-name suffix — the pool suffix stashed at chat.ts (Point 1) or a suffix on a bare
+  // single-model request. Runs once per target (pools re-enter handleChatCore per target) so
+  // each target's format gets the correct wiring, and BEFORE the summarizeThinking display
+  // patch so that patch can add display:"summarized". Mirrors applyClaudeEffortVariant.
+  {
+    const thinkingVariant = applyThinkingSuffixVariant({
+      provider,
+      effectiveModel,
+      body,
+      sourceFormat,
+      targetFormat,
+    });
+    effectiveModel = thinkingVariant.effectiveModel;
+    if (thinkingVariant.log) {
+      log?.info?.("THINKING-SUFFIX", thinkingVariant.log);
+    }
+  }
 
   const initialProviderRequest =
     body && typeof body === "object" && !Array.isArray(body)
@@ -2292,10 +2315,49 @@ export async function handleChatCore({
           DEFAULT_THINKING_CLAUDE_SIGNATURE
         ) as typeof translatedBody.messages;
 
+        // Keep replayed thinking blocks whose signature is safe for the target model,
+        // drop the rest (#2454/#5108/#5312): a signature is model-bound server-side, so a
+        // combo model hop (opus→sonnet) or an empty/foreign one would 400. Preserving the
+        // rest keeps the reasoning chain on same-model multi-turn.
+        translatedBody.messages = sanitizeClaudePassthroughThinkingBlocks(
+          translatedBody.messages,
+          effectiveModel
+        ) as typeof translatedBody.messages;
+
         // Anthropic API rejects requests with both temperature and top_p.
         // VS Code Claude extension and similar clients send both; strip top_p.
         if (translatedBody.temperature !== undefined && translatedBody.top_p !== undefined) {
           delete translatedBody.top_p;
+        }
+
+        // Opt-in (per-connection "summarized thinking display"): redact-thinking beta
+        // returns signature-only (empty-text) thinking blocks unless the request sets
+        // thinking.display="summarized". Mirrors CLIProxyAPI's ensureClaudeThinkingDisplay
+        // so Claude OAuth streams visible thinking deltas. Off by default.
+        const claudeRequestDefaults = getClaudeCodeCompatibleRequestDefaults(
+          credentials?.providerSpecificData
+        );
+        const thinkingConfig = translatedBody.thinking;
+        if (
+          claudeRequestDefaults.summarizeThinking === true &&
+          thinkingConfig &&
+          typeof thinkingConfig === "object"
+        ) {
+          const thinkingType = String((thinkingConfig as Record<string, unknown>).type ?? "")
+            .trim()
+            .toLowerCase();
+          const hasDisplay =
+            Object.prototype.hasOwnProperty.call(thinkingConfig, "display") &&
+            String((thinkingConfig as Record<string, unknown>).display ?? "").trim().length > 0;
+          if (
+            !hasDisplay &&
+            (thinkingType === "enabled" || thinkingType === "adaptive" || thinkingType === "auto")
+          ) {
+            translatedBody.thinking = {
+              ...(thinkingConfig as Record<string, unknown>),
+              display: "summarized",
+            };
+          }
         }
       }
 
@@ -5779,6 +5841,19 @@ export async function handleChatCore({
     );
   }
 
+  const codexOpaqueResponsesReplay =
+    provider === "codex" && targetFormat === FORMATS.OPENAI_RESPONSES && !nativeCodexPassthrough
+      ? (() => {
+          const sessionId = extractSessionAffinityKey(body, clientRawRequest?.headers);
+          return sessionId && !sessionId.startsWith("input:sha256:") && effectiveModel
+            ? {
+                model: effectiveModel,
+                sessionId,
+                store: (value) => codexOpaqueResponsesReplayStore.appendTurn(value),
+              }
+            : undefined;
+        })()
+      : undefined;
   const finalStream = assembleStreamingPipeline({
     providerResponse,
     transformStream,
@@ -5788,6 +5863,7 @@ export async function handleChatCore({
     clientResponseFormat,
     echoModel,
     responseHeaders,
+    codexOpaqueResponsesReplay,
   });
 
   // ── Gamification event (fire-and-forget) ──

@@ -68,7 +68,10 @@ import {
 import {
   preflightQuota,
   isQuotaPreflightEnabled,
+  type QuotaWarnInfo,
 } from "@omniroute/open-sse/services/quotaPreflight.ts";
+import { notifyWebhookEvent } from "@/lib/webhookDispatcher";
+import { shouldNotifyWarn } from "@/lib/quota/warnNotificationDedup";
 import { resolveResilienceSettings } from "@/lib/resilience/settings";
 import { resolveModelLockoutSettings } from "@/lib/resilience/modelLockoutSettings";
 import {
@@ -156,6 +159,15 @@ import {
   getOAuthSessionAvailability,
   reserveOAuthSession,
 } from "@omniroute/open-sse/services/oauthSessionOccupancy.ts";
+
+// Buffer (remaining %) added on top of a window's cutoff to derive its early
+// "approaching cutoff" warn level. When a window has no real cutoff, this
+// value IS the warn level. Env: QUOTA_WARN_BUFFER_PERCENT (default 5).
+function resolveQuotaWarnBufferPercent(): number {
+  const raw = Number(process.env.QUOTA_WARN_BUFFER_PERCENT);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 100 ? raw : 5;
+}
+const QUOTA_WARN_BUFFER_PERCENT = resolveQuotaWarnBufferPercent();
 
 type JsonRecord = Record<string, unknown>;
 interface RecoverableConnectionState {
@@ -2335,10 +2347,33 @@ export async function getProviderCredentialsWithQuotaPreflight(
       }
       return defaultThresholdPercent;
     };
+    // Warn level (remaining %) auto-derived from the cutoff plus a fixed
+    // buffer (QUOTA_WARN_BUFFER_PERCENT env). When no real cutoff is set for
+    // the window, the buffer itself IS the warn level. Never below the global
+    // warn floor so an operator who raised it globally still wins.
+    const resolveWarnRemainingPercent = (windowName: string | null): number => {
+      const cutoff = resolveMinRemainingPercent(windowName);
+      const hasCutoff = cutoff > FACTORY_NO_OP_REMAINING_PERCENT;
+      const derived = hasCutoff ? cutoff + QUOTA_WARN_BUFFER_PERCENT : QUOTA_WARN_BUFFER_PERCENT;
+      return Math.min(100, Math.max(derived, warnThresholdPercent));
+    };
     // #6842: openrouter also needs requestedModel, for the :free-window check.
     const modelAwarePreflight = provider === "codex" || provider === "openrouter";
     const preflightCredentials =
       requestedModel && modelAwarePreflight ? { ...credentials, requestedModel } : credentials;
+    const emitWarnWebhook = (info: QuotaWarnInfo): void => {
+      if (!shouldNotifyWarn(provider, connectionId, info.window, info.resetAt)) return;
+      notifyWebhookEvent("quota.exceeded", {
+        provider,
+        connectionId,
+        window: info.window,
+        remainingPct: Math.round(info.remainingPercent),
+        used: info.used,
+        limit: info.total,
+        resetAt: info.resetAt,
+        reason: "approaching-cutoff",
+      });
+    };
     let preflight;
     try {
       preflight = await preflightQuota(
@@ -2347,8 +2382,9 @@ export async function getProviderCredentialsWithQuotaPreflight(
         preflightCredentials as Record<string, unknown>,
         {
           resolveMinRemainingPercent,
-          resolveWarnRemainingPercent: () => warnThresholdPercent,
-        }
+          resolveWarnRemainingPercent,
+        },
+        emitWarnWebhook
       );
     } catch (error) {
       selectedCredentials.releaseOAuthSession?.();
