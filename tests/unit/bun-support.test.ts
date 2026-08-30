@@ -98,6 +98,8 @@ test("createSyncDriverFactory prefers better-sqlite3 when running under Node", (
 
 // Bun/Node detection must not silently override an explicit operator build choice.
 // Automatic low-memory webpack fallback only applies when the variable is unset.
+// Bun 1.4+ supports Turbopack's V8 worker bindings (#11471), so there is no
+// bun-only forced webpack path; the same rules apply under both runtimes.
 test("resolveNextBuildBundlerFlag uses the same memory and override rules under Bun and Node", async () => {
   const buildIsolated = await import("../../scripts/build/build-next-isolated.mjs");
   const originalBun = process.versions.bun;

@@ -180,6 +180,9 @@ export function resolveNextBuildBundlerFlag(
   baseEnv = process.env,
   memoryBytes = getEffectiveBuildMemoryBytes()
 ) {
+  // OMNIROUTE_USE_TURBOPACK is the operator's control (#6409, docs/reference/ENVIRONMENT.md);
+  // the runtime is never sniffed. Bun 1.4+ supports Turbopack's V8 worker bindings (#11471),
+  // so the historical `process.versions.bun` → `--webpack` hardcode is gone.
   // A blank value is common when Compose forwards an unset shell variable.
   // Treat it like an absent opt-in instead of accidentally forcing Turbopack
   // on a RAM-constrained host. Keep "0" and all NONEMPTY overrides authoritative.
