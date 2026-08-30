@@ -267,7 +267,8 @@ buildkit failed the step with `ResourceExhausted: ... cannot allocate memory`;
 `3` (→ 2 workers) still didn't fit once the per-process RSS was measured
 directly instead of inferred. `tests/unit/docker-build-memory-budget.test.ts`
 does the arithmetic against the measured figure and fails if either knob
-outgrows the runner.
+outgrows the runner. Both images (node and Bun) share these defaults; the Bun
+image's are set in `Dockerfile.bun` (Turbopack on Bun 1.4+, `#11719`).
 
 Turbopack compiles in native Rust memory that lives **outside** the V8 heap, so
 `OMNIROUTE_BUILD_MEMORY_MB` does not bound it. On a host with a memory ceiling the
