@@ -137,7 +137,10 @@ export function resolveNextBuildBundlerFlag(baseEnv = process.env) {
   // to webpack (Windows, native-binding trouble, RAM-constrained machines — #6409, and
   // docs/reference/ENVIRONMENT.md). The choice is env-only ON PURPOSE: the variable is
   // the operator's control and CI sets it explicitly, so sniffing the runtime here would
-  // silently override an operator who asked for Turbopack.
+  // silently override an operator who asked for Turbopack. Bun 1.4+ supports Turbopack's
+  // V8 worker bindings (#11471), so the historical `process.versions.bun` → `--webpack`
+  // hardcode is gone; the `OMNIROUTE_USE_TURBOPACK=0` fallback remains for Bun < 1.4
+  // images built with the webpack path.
   if (baseEnv.OMNIROUTE_USE_TURBOPACK === "0") {
     return "--webpack";
   }
