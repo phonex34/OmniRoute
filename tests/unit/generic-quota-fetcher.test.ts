@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 const genericModule = await import("../../open-sse/services/genericQuotaFetcher.ts");
 const preflightModule = await import("../../open-sse/services/quotaPreflight.ts");
 
-const { convertUsageToQuotaInfo, registerGenericQuotaFetchers } = genericModule;
+const { convertUsageToQuotaInfo, registerGenericQuotaFetchers, computeAdaptiveTtl } = genericModule;
 const { getQuotaFetcher } = preflightModule;
+
+const MINUTE = 60_000;
 
 test("convertUsageToQuotaInfo returns null on null/undefined input", () => {
   assert.equal(convertUsageToQuotaInfo(null), null);
@@ -99,6 +101,78 @@ test("convertUsageToQuotaInfo does not let an unreported window inflate worstPer
   assert.deepEqual(Object.keys(result!.windows || {}), ["reported_low"]);
   assert.equal(result!.percentUsed, 0.2);
   assert.equal(result!.limitReached, false);
+});
+
+test("computeAdaptiveTtl trusts a far-from-cutoff account for a long time", () => {
+  const now = Date.now();
+  // 19% used → 81% remaining, cutoff 5% → 76% headroom → longest bucket.
+  const quota = {
+    used: 0,
+    total: 0,
+    percentUsed: 0.19,
+    resetAt: new Date(now + 5 * 60 * MINUTE).toISOString(),
+    windows: {
+      "session (5h)": {
+        percentUsed: 0.19,
+        resetAt: new Date(now + 5 * 60 * MINUTE).toISOString(),
+      },
+    },
+    limitReached: false,
+  };
+  const ttl = computeAdaptiveTtl(quota, { quotaWindowThresholds: { "session (5h)": 5 } }, now);
+  // Clamped only by the 5h resetAt (300 min) — still far above the old 60s.
+  assert.ok(ttl >= 60 * MINUTE, `expected long TTL, got ${ttl / MINUTE}min`);
+});
+
+test("computeAdaptiveTtl refetches quickly for a near-cutoff account", () => {
+  const now = Date.now();
+  // 92% used → 8% remaining, cutoff 5% → 3% headroom → shortest bucket.
+  const quota = {
+    used: 0,
+    total: 0,
+    percentUsed: 0.92,
+    resetAt: new Date(now + 5 * 60 * MINUTE).toISOString(),
+    windows: {
+      "session (5h)": {
+        percentUsed: 0.92,
+        resetAt: new Date(now + 5 * 60 * MINUTE).toISOString(),
+      },
+    },
+    limitReached: false,
+  };
+  const ttl = computeAdaptiveTtl(quota, { quotaWindowThresholds: { "session (5h)": 5 } }, now);
+  assert.ok(ttl <= MINUTE, `expected short TTL near cutoff, got ${ttl / 1000}s`);
+});
+
+test("computeAdaptiveTtl never trusts past a window's resetAt", () => {
+  const now = Date.now();
+  // Far from cutoff (would earn the 90-min bucket) but the window resets in 2min.
+  const quota = {
+    used: 0,
+    total: 0,
+    percentUsed: 0.1,
+    resetAt: new Date(now + 2 * MINUTE).toISOString(),
+    windows: {
+      "weekly (7d)": { percentUsed: 0.1, resetAt: new Date(now + 2 * MINUTE).toISOString() },
+    },
+    limitReached: false,
+  };
+  const ttl = computeAdaptiveTtl(quota, {}, now);
+  assert.ok(ttl <= 2 * MINUTE, `TTL must be clamped to resetAt, got ${ttl / MINUTE}min`);
+});
+
+test("computeAdaptiveTtl returns the minimum TTL when the account is exhausted", () => {
+  const now = Date.now();
+  const quota = {
+    used: 0,
+    total: 0,
+    percentUsed: 1,
+    resetAt: null,
+    windows: { "session (5h)": { percentUsed: 1, resetAt: null } },
+    limitReached: true,
+  };
+  const ttl = computeAdaptiveTtl(quota, {}, now);
+  assert.ok(ttl <= 15_000, `exhausted account must refetch fast, got ${ttl / 1000}s`);
 });
 
 test("registerGenericQuotaFetchers registers Claude, GLM, and OpenCode Go via the generic adapter", () => {
