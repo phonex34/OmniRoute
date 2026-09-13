@@ -154,7 +154,6 @@ export async function POST(request) {
 
     if (nodeType === "openai-compatible") {
       const resolvedName = (name || "").trim();
-      const resolvedPrefix = (prefix || "").trim();
       const resolvedBaseUrl = (baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl).trim();
       const baseUrlError = validateProviderNodeBaseUrl(resolvedBaseUrl);
       if (baseUrlError) return baseUrlError;
@@ -162,7 +161,7 @@ export async function POST(request) {
       const node = await createProviderNode({
         id: `${OPENAI_COMPATIBLE_PREFIX}${apiType}-${generateId()}`,
         type: "openai-compatible",
-        prefix: resolvedPrefix,
+        prefix: prefix?.trim() || null,
         apiType,
         baseUrl: resolvedBaseUrl,
         name: resolvedName,
@@ -193,7 +192,7 @@ export async function POST(request) {
             ? `${CLAUDE_CODE_COMPATIBLE_PREFIX}${generateId()}`
             : `${ANTHROPIC_COMPATIBLE_PREFIX}${generateId()}`,
         type: "anthropic-compatible",
-        prefix: (prefix || "").trim(),
+        prefix: prefix?.trim() || null,
         baseUrl: sanitizedBaseUrl,
         name: (name || "").trim(),
         chatPath: chatPath || null,

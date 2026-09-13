@@ -44,7 +44,9 @@ interface WebhookCardProps {
   webhook: WebhookItem;
   t: (key: string, opts?: Record<string, unknown>) => string;
   testingId: string | null;
+  sendingUsageId?: string | null;
   onTest: (wh: WebhookItem) => void;
+  onSendUsage?: (wh: WebhookItem) => void;
   onToggleEnabled: (wh: WebhookItem) => void;
   onEdit: (wh: WebhookItem) => void;
   onDelete: (wh: WebhookItem) => void;
@@ -54,7 +56,9 @@ export function WebhookCard({
   webhook,
   t,
   testingId,
+  sendingUsageId,
   onTest,
+  onSendUsage,
   onToggleEnabled,
   onEdit,
   onDelete,
@@ -62,33 +66,43 @@ export function WebhookCard({
   const [expanded, setExpanded] = useState(false);
   const status = getStatus(webhook);
   const isTesting = testingId === webhook.id;
+  const isSendingUsage = sendingUsageId === webhook.id;
 
   return (
     <div className="rounded-xl border border-border bg-surface transition-shadow hover:shadow-sm">
-      <div className="flex items-center gap-3 p-4">
-        <span
-          className={`material-symbols-outlined shrink-0 text-[22px] ${KIND_COLORS[webhook.kind]}`}
-        >
-          {KIND_ICONS[webhook.kind]}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-text-main">
-            {webhook.description || t("unnamedWebhook")}
-          </p>
-          <p className="truncate text-xs text-text-muted">{webhook.url}</p>
+      <div className="flex min-w-0 flex-col gap-3 p-4 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 basis-0 items-center gap-3">
+          <span
+            className={`material-symbols-outlined shrink-0 text-[22px] ${KIND_COLORS[webhook.kind]}`}
+          >
+            {KIND_ICONS[webhook.kind]}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p
+              className="truncate text-sm font-semibold text-text-main"
+              title={webhook.description || t("unnamedWebhook")}
+            >
+              <span aria-hidden="true">{webhook.description || t("unnamedWebhook")}</span>
+              <span className="sr-only">{webhook.description || t("unnamedWebhook")}</span>
+            </p>
+            <p className="truncate text-xs text-text-muted" title={webhook.url}>
+              <span aria-hidden="true">{webhook.url}</span>
+              <span className="sr-only">{webhook.url}</span>
+            </p>
+          </div>
+          <span
+            className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${
+              status === "active"
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
+                : status === "errored"
+                  ? "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300"
+                  : "border-border bg-sidebar text-text-muted"
+            }`}
+          >
+            {t(status)}
+          </span>
         </div>
-        <span
-          className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${
-            status === "active"
-              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
-              : status === "errored"
-                ? "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300"
-                : "border-border bg-sidebar text-text-muted"
-          }`}
-        >
-          {t(status)}
-        </span>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 flex-wrap items-center gap-1 sm:ml-auto sm:justify-end">
           <button
             type="button"
             onClick={() => onTest(webhook)}
@@ -102,6 +116,21 @@ export function WebhookCard({
               {isTesting ? "sync" : "send"}
             </span>
           </button>
+          {onSendUsage && (
+            <button
+              type="button"
+              onClick={() => onSendUsage(webhook)}
+              disabled={isSendingUsage}
+              title={t("sendUsage")}
+              className="rounded-lg p-2 text-text-muted transition-colors hover:bg-primary/10 hover:text-primary disabled:opacity-40"
+            >
+              <span
+                className={`material-symbols-outlined text-[18px] ${isSendingUsage ? "animate-spin" : ""}`}
+              >
+                {isSendingUsage ? "sync" : "monitoring"}
+              </span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onToggleEnabled(webhook)}
