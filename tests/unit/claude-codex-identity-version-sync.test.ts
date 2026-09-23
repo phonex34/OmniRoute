@@ -94,10 +94,7 @@ test("Codex client version locksteps Dockerfile @openai/codex", () => {
   assert.equal(codexCfg.DEFAULT_CODEX_CLIENT_VERSION, pinned);
   assert.equal(codexCfg.getCodexClientVersion(), pinned);
   assert.equal(codexCfg.getCodexDefaultHeaders().Version, pinned);
-  assert.equal(
-    codexCfg.getCodexCliRsHeaders()["User-Agent"],
-    `codex_cli_rs/${pinned}`,
-  );
+  assert.equal(codexCfg.getCodexCliRsHeaders()["User-Agent"], `codex_cli_rs/${pinned}`);
 });
 
 test("Codex client version env override still wins", async () => {
@@ -110,7 +107,7 @@ test("Codex client version env override still wins", async () => {
 test("test 7: live-empty GitHub catalog path does not call persist", () => {
   const src = fs.readFileSync(
     path.join(process.cwd(), "src/app/api/providers/[id]/models/route.ts"),
-    "utf8",
+    "utf8"
   );
   // The githubCatalogModels fallback must use buildResponse, not buildApiDiscoveryResponse.
   const idx = src.indexOf("Codex live catalog unavailable — using GitHub model catalog");
@@ -137,16 +134,13 @@ test("Codex client version locksteps Dockerfile @openai/codex and env override",
   assert.equal(codexCfg.DEFAULT_CODEX_CLIENT_VERSION, pinned);
   assert.equal(codexCfg.getCodexClientVersion(), pinned);
   assert.equal(codexCfg.getCodexDefaultHeaders().Version, pinned);
-  assert.equal(
-    codexCfg.getCodexCliRsHeaders()["User-Agent"],
-    `codex_cli_rs/${pinned}`,
-  );
+  assert.equal(codexCfg.getCodexCliRsHeaders()["User-Agent"], `codex_cli_rs/${pinned}`);
 });
 
 test("test 7: live-empty GitHub catalog path does not call persist", () => {
   const src = fs.readFileSync(
     path.join(process.cwd(), "src/app/api/providers/[id]/models/route.ts"),
-    "utf8",
+    "utf8"
   );
   // The githubCatalogModels fallback must use buildResponse, not buildApiDiscoveryResponse.
   const idx = src.indexOf("Codex live catalog unavailable — using GitHub model catalog");
