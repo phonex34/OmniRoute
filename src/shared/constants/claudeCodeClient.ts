@@ -31,7 +31,10 @@ function getSafeEnvValue(name: string, pattern: RegExp): string | null {
 }
 
 export function getClaudeCodeClientVersion(): string {
-  return getSafeEnvValue(CLAUDE_VERSION_OVERRIDE_ENV, SAFE_HEADER_TOKEN_PATTERN) || CLAUDE_CODE_CLIENT_VERSION;
+  return (
+    getSafeEnvValue(CLAUDE_VERSION_OVERRIDE_ENV, SAFE_HEADER_TOKEN_PATTERN) ||
+    CLAUDE_CODE_CLIENT_VERSION
+  );
 }
 
 /**
