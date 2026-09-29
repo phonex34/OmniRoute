@@ -67,3 +67,24 @@ test("#2454 explicit model arg overrides body.model for tiering", () => {
   const flags = selectBetaFlags(fullAgentBody("claude-sonnet-4-6"), "claude-haiku-4-5-20251001");
   assert.ok(!flags.includes("context-1m-2025-08-07"));
 });
+
+// redact-thinking empties thinking text even with `thinking.display:"summarized"`, so a
+// client that negotiated interleaved thinking without it (omp) saw blank thinking blocks.
+test("negotiated client without redact-thinking keeps visible thinking", () => {
+  const flags = selectBetaFlags(
+    fullAgentBody("claude-opus-5-5"),
+    null,
+    "effort-2025-11-24,context-management-2025-06-27,interleaved-thinking-2025-05-14"
+  ).split(",");
+  assert.ok(flags.includes("interleaved-thinking-2025-05-14"));
+  assert.ok(!flags.includes("redact-thinking-2026-02-12"));
+});
+
+test("negotiated client that asks for redact-thinking still gets it", () => {
+  const flags = selectBetaFlags(
+    fullAgentBody("claude-opus-5-5"),
+    null,
+    "interleaved-thinking-2025-05-14,redact-thinking-2026-02-12"
+  ).split(",");
+  assert.ok(flags.includes("redact-thinking-2026-02-12"));
+});
