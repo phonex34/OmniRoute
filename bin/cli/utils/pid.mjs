@@ -95,11 +95,7 @@ export async function findListeningPids(port, deps = {}) {
   } catch (err) {
     // POSIX lsof exits 1 with empty output when there are simply no matches.
     // That is the normal "port is free" result, not a discovery failure.
-    if (
-      platform !== "win32" &&
-      err?.code === 1 &&
-      !String(err?.stdout ?? "").trim()
-    ) {
+    if (platform !== "win32" && err?.code === 1 && !String(err?.stdout ?? "").trim()) {
       return [];
     }
     // Tool missing (ENOENT) or genuinely unusable: "no listener" cannot be
@@ -136,6 +132,20 @@ export async function probePortFree(port, deps = {}) {
     if (!(await bindable(host))) return false;
   }
   return true;
+}
+
+// Serve preflight: the PIDs holding `port`, [null] when the port is held by an
+// unidentified owner, or [] when it is free. Always an array. Discovery returns
+// null when it cannot look (tool missing, or `lsof` exiting 1 on an idle port),
+// and a free bind probe must then resolve to [] rather than leak that null.
+export async function findPortOwners(port, deps = {}) {
+  const discover = deps.findListeningPids || findListeningPids;
+  const probe = deps.probePortFree || probePortFree;
+  const pids = await discover(port);
+  if (Array.isArray(pids) && pids.length > 0) return pids;
+  // Discovery unavailable (#14518) or it saw nothing: that window can race a
+  // starting instance, so a bind probe confirms either way.
+  return (await probe(port)) ? [] : [null];
 }
 
 function parseNetstatListeningPids(stdout, port) {
