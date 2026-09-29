@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { WebhookDeliveriesPanel } from "./WebhookDeliveriesPanel";
 
-export type WebhookKind = "slack" | "telegram" | "discord" | "custom";
+export type WebhookKind = "slack" | "telegram" | "discord" | "msteams" | "custom";
 
 export interface WebhookItem {
   id: string;
@@ -24,6 +24,7 @@ const KIND_ICONS: Record<WebhookKind, string> = {
   slack: "chat",
   telegram: "send",
   discord: "forum",
+  msteams: "groups",
   custom: "webhook",
 };
 
@@ -31,6 +32,7 @@ const KIND_COLORS: Record<WebhookKind, string> = {
   slack: "text-emerald-500",
   telegram: "text-blue-500",
   discord: "text-violet-500",
+  msteams: "text-indigo-500",
   custom: "text-amber-500",
 };
 
