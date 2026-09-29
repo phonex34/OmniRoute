@@ -53,6 +53,16 @@ function parsePort(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 && parsed <= 65535 ? parsed : fallback;
 }
 
+// `--ready-timeout <ms>` arrives as a string from Commander, but
+// resolveReadyTimeoutMs only honours a positive *number* — an uncoerced string
+// silently fell back to the 60s default. Normalise here so the flag actually
+// overrides, and so a bad value falls through to env/default instead of NaN.
+function parseReadyTimeout(value) {
+  if (value == null) return undefined;
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 export function registerServe(program) {
   const command = program
     .command("serve", { isDefault: true })
@@ -326,7 +336,7 @@ export async function runServe(opts = {}) {
     {
       trayReadyPort: opts.trayReadyPort,
       trayReadyToken: opts.trayReadyToken,
-      readyTimeoutMs: resolveReadyTimeoutMs({ timeoutMs: opts.readyTimeout }),
+      readyTimeoutMs: resolveReadyTimeoutMs({ timeoutMs: parseReadyTimeout(opts.readyTimeout) }),
     }
   );
 }
@@ -560,7 +570,7 @@ async function runWithSupervisor(
         }
         onReady(dashboardPort, apiPort, noOpen, startedAt);
       } else {
-        reportReadinessTimeout(dashboardPort, supervisor, lastProbeOutcome);
+        reportReadinessTimeout(dashboardPort, supervisor, lastProbeOutcome, readyTimeoutMs);
       }
     });
   }
@@ -572,8 +582,12 @@ async function runWithSupervisor(
 // stuck (issue reports show the server sometimes actually comes up later, or is
 // reachable directly while the CLI still looks hung). Surface a clear diagnostic
 // plus whatever stdout/stderr the child buffered instead of going silent.
-export function reportReadinessTimeout(dashboardPort, supervisor, lastProbeOutcome = null) {
-  const readyTimeoutMs = resolveReadyTimeoutMs();
+export function reportReadinessTimeout(
+  dashboardPort,
+  supervisor,
+  lastProbeOutcome = null,
+  readyTimeoutMs = resolveReadyTimeoutMs()
+) {
   const seconds = Math.round(readyTimeoutMs / 1000);
   console.error(
     `\n\x1b[33m⚠ Server did not respond within ${seconds}s.\x1b[0m It may still be starting, or may` +
