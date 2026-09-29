@@ -426,11 +426,15 @@ export function selectBetaFlags(
   // interleaved-thinking semantics that conflict with a tool_choice-forced turn,
   // producing malformed opus tool_use streams when the client never asked for it.
   if (allowThinking) {
-    flags.push(
-      "interleaved-thinking-2025-05-14",
-      "redact-thinking-2026-02-12",
-      "thinking-token-count-2026-05-13"
-    );
+    flags.push("interleaved-thinking-2025-05-14");
+    // redact-thinking empties every thinking block's text, even with
+    // `thinking.display:"summarized"`. A client that negotiated its own betas
+    // (e.g. omp sends interleaved-thinking without it) must get it only when it
+    // asked for redacted thinking; opaque clients keep the captured CLI set.
+    if (clientBetaSet === null || clientBetaSet.has("redact-thinking-2026-02-12")) {
+      flags.push("redact-thinking-2026-02-12");
+    }
+    flags.push("thinking-token-count-2026-05-13");
   }
   flags.push("context-management-2025-06-27", "prompt-caching-scope-2026-01-05");
   if (hasStructuredOutput || isFullAgent) flags.push("advisor-tool-2026-03-01");
