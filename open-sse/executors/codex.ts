@@ -1844,6 +1844,7 @@ export class CodexExecutor extends BaseExecutor {
     delete body.messages;
     delete body.prompt;
 
+
     ensureCodexReasoningSummary(body);
     if (isCompactRequest) {
       delete body.include;
