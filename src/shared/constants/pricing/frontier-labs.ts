@@ -21,6 +21,9 @@ import {
 
 export const DEFAULT_PRICING_FRONTIER = {
   openai: {
+    // Standard short-context USD/MTok. Long-context and other processing tiers
+    // are not represented by this static row. See the GPT-6.1 Sol API model page.
+    "gpt-6.1-sol": { input: 2, output: 10, cached: 0.1, reasoning: 10, cache_creation: 2.5 },
     "gpt-6-astra": GPT_6_ASTRA_PRICING,
     "gpt-5.6": GPT_5_6_SOL_PRICING,
     "gpt-5.6-sol": GPT_5_6_SOL_PRICING,
