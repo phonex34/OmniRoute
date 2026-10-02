@@ -101,11 +101,11 @@ export function getCodexFastCostMultiplier(
 
   const modelKey = stripCodexEffortSuffix(normalizeModelName(String(model || "")).toLowerCase());
   const compactModelKey = modelKey.replace(/-/g, "");
+  // GPT-6.1 Sol purchased-credit/USD Fast rate is 2x, not the 2.5x
+  // included-subscription consumption multiplier (codex/pricing and codex/speed).
+  if (compactModelKey === "gpt6.1sol") return 2;
   // Codex GPT-6 Fast is 2.5x Standard (https://developers.openai.com/codex/pricing).
-  if (
-    /^gpt-6-(?:astra|sol|luna)$/.test(modelKey) ||
-    /^gpt6(?:astra|sol|luna)$/.test(compactModelKey)
-  ) {
+  if (/^gpt6(?:astra|sol|luna)$/.test(compactModelKey)) {
     return 2.5;
   }
   if (

@@ -1851,7 +1851,7 @@ export class CodexExecutor extends BaseExecutor {
     const explicitReasoning = normalizeEffortValue(reasoningRecord?.effort);
     const requestReasoningEffort = normalizeEffortValue(body.reasoning_effort);
     const fallbackReasoningEffort = allowConnectionReasoningDefaults
-      ? requestDefaults.reasoningEffort || "medium"
+      ? requestDefaults.reasoningEffort || (cleanModel === "gpt-6.1-sol" ? "low" : "medium")
       : undefined;
     // Issue #2331: model suffix aliases (for example gpt-5.5-xhigh) represent an
     // explicit model selection, so they must override client-injected defaults such

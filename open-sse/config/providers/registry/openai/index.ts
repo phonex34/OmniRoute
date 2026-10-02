@@ -12,6 +12,14 @@ export const openaiProvider: RegistryEntry = {
   authHeader: "bearer",
   defaultContextLength: 128000,
   models: [
+    // https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    // API: 1.05M context, low..max (no none/minimal); tools require Responses.
+    {
+      id: "gpt-6.1-sol",
+      name: "GPT-6.1 Sol",
+      ...GPT_5_6_API_CAPABILITIES,
+      unsupportedParams: ["temperature", "top_p", "top_logprobs", "logprobs"],
+    },
     // Astra shares the public GPT-5.6 limits; tool calling requires Responses.
     // https://developers.openai.com/api/docs/guides/latest-model
     {
