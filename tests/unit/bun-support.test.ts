@@ -27,14 +27,22 @@ test("createSyncDriverFactory prefers bun:sqlite built-in driver when running un
     (process.versions as Record<string, string>).bun = "1.1.20";
 
     const dummyBunDb = {
-      query: () => ({ run: () => ({ changes: 1, lastInsertRowid: 1 }), get: () => null, all: () => [] }),
+      query: () => ({
+        run: () => ({ changes: 1, lastInsertRowid: 1 }),
+        get: () => null,
+        all: () => [],
+      }),
       exec: () => {},
       close: () => {},
     };
 
     const loader = (modName: string) => {
       if (modName === "bun:sqlite") {
-        return { Database: function DummyBunDatabase() { return dummyBunDb; } };
+        return {
+          Database: function DummyBunDatabase() {
+            return dummyBunDb;
+          },
+        };
       }
       throw new Error(`Unexpected module ${modName}`);
     };

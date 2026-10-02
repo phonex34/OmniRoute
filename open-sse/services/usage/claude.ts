@@ -9,13 +9,15 @@
  * getClaudePlanLabel (__testing). Behavior-preserving move.
  */
 
-import { safePercentage } from "@/shared/utils/formatting";
-import { CLAUDE_CODE_VERSION, fetchClaudeBootstrap } from "../../executors/claudeIdentity.ts";
-import { isClaudeOauthUsageCoolingDown, markClaudeOauthUsage429 } from "../claudeUsageCooldown.ts";
+import { getClaudeCodeVersion, fetchClaudeBootstrap } from "../../executors/claudeIdentity.ts";
+import {
+  isClaudeOauthUsageCoolingDown,
+  markClaudeOauthUsage429,
+  isClaudeUsageFetchTooSoon,
+  markClaudeUsageFetchAttempt,
+} from "../claudeUsageCooldown.ts";
 import { toRecord } from "./scalars.ts";
-import { type UsageQuota, parseResetTime } from "./quota.ts";
-
-type JsonRecord = Record<string, unknown>;
+import { normalizeClaudeUsageQuotas } from "./claudeQuota.ts";
 
 // Claude API config
 const CLAUDE_CONFIG = {
@@ -51,12 +53,14 @@ export async function getClaudeUsage(accessToken?: string) {
 
   // Refresh bootstrap in parallel; best-effort, failure non-fatal.
   const bootstrapPromise = fetchClaudeBootstrap(accessToken).catch(() => null);
-  // Skip OAuth usage call while this token is cooling down from a recent 429
-  // (chat with the same token still works — only the quota endpoint is throttled).
-  if (isClaudeOauthUsageCoolingDown(accessToken)) {
+  // Skip OAuth usage call while this token is cooling down from a recent 429,
+  // or when the previous poll was too recent (proactive min-interval gate). Chat
+  // with the same token still works — only the quota endpoint is throttled.
+  if (isClaudeOauthUsageCoolingDown(accessToken) || isClaudeUsageFetchTooSoon(accessToken)) {
     const legacy = await getClaudeUsageLegacy(accessToken);
     return { ...legacy, bootstrap: await bootstrapPromise };
   }
+  markClaudeUsageFetchAttempt(accessToken);
   try {
     // Real CLI uses axios here, not Stainless — UA is `claude-code/<version>`
     // (not `claude-cli/...`) and the shape is simpler than /v1/messages.
@@ -71,7 +75,7 @@ export async function getClaudeUsage(accessToken?: string) {
           "Accept-Encoding": "gzip, compress, deflate, br",
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
-          "User-Agent": `claude-code/${CLAUDE_CODE_VERSION}`,
+          "User-Agent": `claude-code/${getClaudeCodeVersion()}`,
           "anthropic-beta": "oauth-2025-04-20",
         },
         signal: ctrl.signal,
@@ -82,48 +86,7 @@ export async function getClaudeUsage(accessToken?: string) {
 
     if (oauthResponse.ok) {
       const data = toRecord(await oauthResponse.json());
-      const quotas: Record<string, UsageQuota> = {};
-
-      // utilization = percentage USED (e.g., 90 means 90% used, 10% remaining)
-      // Confirmed via user report #299: Claude.ai shows 87% used = OmniRoute must show 13% remaining.
-      const hasUtilization = (window: JsonRecord) =>
-        window && typeof window === "object" && safePercentage(window.utilization) !== undefined;
-
-      const createQuotaObject = (window: JsonRecord) => {
-        const used = safePercentage(window.utilization) as number; // utilization = % used
-        const remaining = Math.max(0, 100 - used);
-        return {
-          used,
-          total: 100,
-          remaining,
-          resetAt: parseResetTime(window.resets_at),
-          remainingPercentage: remaining,
-          unlimited: false,
-        };
-      };
-
-      const fiveHour = toRecord(data.five_hour);
-      if (hasUtilization(fiveHour)) {
-        quotas["session (5h)"] = createQuotaObject(fiveHour);
-      }
-
-      const sevenDay = toRecord(data.seven_day);
-      if (hasUtilization(sevenDay)) {
-        quotas["weekly (7d)"] = createQuotaObject(sevenDay);
-      }
-
-      // Map Anthropic's internal codenames (e.g., omelette → Designer) for display.
-      const MODEL_DISPLAY_NAMES: Record<string, string> = {
-        omelette: "designer",
-      };
-      for (const [key, value] of Object.entries(data)) {
-        const valueRecord = toRecord(value);
-        if (key.startsWith("seven_day_") && key !== "seven_day" && hasUtilization(valueRecord)) {
-          const codename = key.replace("seven_day_", "");
-          const modelName = MODEL_DISPLAY_NAMES[codename] || codename;
-          quotas[`weekly ${modelName} (7d)`] = createQuotaObject(valueRecord);
-        }
-      }
+      const { quotas, modelQuotas } = normalizeClaudeUsageQuotas(data);
 
       const bootstrap = await bootstrapPromise;
       const plan =
@@ -137,6 +100,7 @@ export async function getClaudeUsage(accessToken?: string) {
       return {
         ...(plan ? { plan } : {}),
         quotas,
+        modelQuotas,
         extraUsage: data.extra_usage ?? null,
         bootstrap,
       };

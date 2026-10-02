@@ -23,6 +23,11 @@ import { createPiiSseTransform as defaultPiiSse } from "@/lib/streamingPiiTransf
 import { isFeatureFlagEnabled as defaultFeatureFlag } from "@/shared/utils/featureFlags";
 import { OMNIROUTE_RESPONSE_HEADERS } from "@/shared/constants/headers";
 import { SSE_HEARTBEAT_INTERVAL_MS } from "../../config/constants.ts";
+import {
+  wrapWithCodexOpaqueResponsesReplayCapture,
+  type CodexOpaqueResponsesReplayContext,
+} from "./codexOpaqueResponsesReplayCapture.ts";
+
 /**
  * Pipeline assembly instrumentation — performance.mark() along the SSE hot path.
  * Marks are visible to Node.js perf_hooks consumers and DevTools' Performance
@@ -36,6 +41,7 @@ const PIPELINE_END = "omni-pipeline-end";
 const PIPELINE_MEASURE = "omni-pipeline";
 
 type HeadersLike = Headers | Record<string, unknown> | null | undefined;
+type StreamingController = Parameters<typeof defaultPipeWithDisconnect>[2];
 
 export interface StreamingPipelineDeps {
   wantsProgress: typeof defaultWantsProgress;
@@ -69,6 +75,13 @@ export function assembleStreamingPipeline(
     clientResponseFormat: Parameters<typeof defaultShape>[0];
     echoModel: string | null | undefined;
     responseHeaders: Record<string, string>;
+    /** See pipeWithDisconnect's own doc comment — the post-handoff "stream is
+     * open but never produced real output" watchdog. Threaded from the same
+     * adaptive streamReadinessPolicy.timeoutMs already computed for this
+     * request's pre-handoff readiness gate, so slow-first-content reasoning
+     * models keep the same generous budget in both phases. */
+    contentStallTimeoutMs?: number;
+    codexOpaqueResponsesReplay?: CodexOpaqueResponsesReplayContext;
   },
   deps: StreamingPipelineDeps = DEFAULT_DEPS
 ) {
@@ -80,10 +93,20 @@ export function assembleStreamingPipeline(
   const progressEnabled = deps.wantsProgress(args.clientRawRequestHeaders);
   let finalStream;
 
+  const transformStream = args.codexOpaqueResponsesReplay
+    ? wrapWithCodexOpaqueResponsesReplayCapture(
+        args.codexOpaqueResponsesReplay,
+        args.transformStream
+      )
+    : args.transformStream;
   let piiStream = deps.pipeWithDisconnect(
     args.providerResponse,
-    args.transformStream,
-    args.streamController
+    // Codex replay capture wraps the transform when present (falls back to
+    // args.transformStream otherwise), and the stall watchdog is orthogonal —
+    // it observes the piped output regardless of which transform is in play.
+    transformStream,
+    args.streamController,
+    { contentStallTimeoutMs: args.contentStallTimeoutMs }
   );
   if (typeof args.createPiiTransform === "function") {
     piiStream = piiStream.pipeThrough((args.createPiiTransform as () => TransformStream)());

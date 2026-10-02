@@ -5,8 +5,17 @@
  * @changes
  * - [2026-07-28] [Cursor Grok 4.5] - Brand-neutral default OpenAI keepalive id/model
  */
+import { SYNTHETIC_RESPONSES_SEQUENCE_NUMBER } from "./responsesSequence.ts";
+
 const HEARTBEAT_ENCODER = new TextEncoder();
-const OPENAI_RESPONSES_IN_PROGRESS_PAYLOAD = 'data: {"type":"response.in_progress"}\n\n';
+// #14330: a bare {"type":"response.in_progress"} frame has no `sequence_number` or
+// `response` object, so a strict Responses decoder (openai-python, Codex/OpenCode/Grok
+// CLIs) aborts on it. Every typed Responses event requires both fields.
+const OPENAI_RESPONSES_IN_PROGRESS_PAYLOAD = `data: ${JSON.stringify({
+  type: "response.in_progress",
+  sequence_number: SYNTHETIC_RESPONSES_SEQUENCE_NUMBER,
+  response: { id: null, status: "in_progress" },
+})}\n\n`;
 
 export const DEFAULT_SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
@@ -47,6 +56,9 @@ function buildHeartbeatPayload(
 ): string {
   switch (shape) {
     case HEARTBEAT_SHAPES.ANTHROPIC_PING:
+      // Strict Anthropic parsers (@ai-sdk/anthropic) reject a typeless `data: {}`
+      // frame ("No matching discriminator, path:[type]") and abort the stream;
+      // every Anthropic SSE event must carry a `type`. Matches ANTHROPIC_PING_FRAME.
       return 'event: ping\ndata: {"type":"ping"}\n\n';
     case HEARTBEAT_SHAPES.OPENAI_RESPONSES_IN_PROGRESS:
       return OPENAI_RESPONSES_IN_PROGRESS_PAYLOAD;

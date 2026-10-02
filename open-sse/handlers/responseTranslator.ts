@@ -5,6 +5,7 @@ import {
 } from "../services/geminiThoughtSignatureStore.ts";
 import { normalizeOpenAICompatibleFinishReasonString } from "../utils/finishReason.ts";
 import { containsTextualToolCallMarker } from "../utils/textualToolCall.ts";
+import { stripObfuscationZeroWidth } from "../utils/zeroWidth.ts";
 import { getAnyReasoningValue } from "../utils/reasoningFields.ts";
 import {
   caseInsensitiveToolNameLookup,
@@ -14,6 +15,10 @@ import { restoreClaudeToolName } from "../services/claudeCodeToolRemapper.ts";
 import { extractReplayableResponsesReasoningText } from "../services/reasoningInputPolicy.ts";
 import { sanitizeToolId } from "../translator/helpers/schemaCoercion.ts";
 import { stripEmptyOptionalToolArgs } from "../translator/response/openai-responses/pureHelpers.ts";
+import {
+  extractThinkingFromContent,
+  shouldParseTextualReasoningTags,
+} from "./responseSanitizer/reasoning.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -63,7 +68,7 @@ function parseTextualToolCall(text: unknown): { name: string; args: unknown } | 
   // variations, e.g. a leading "(empty)" marker or zero-width chars inserted
   // into argument strings. Normalize those variants before parsing so the
   // response is still surfaced as a structured OpenAI tool call.
-  const normalized = text.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  const normalized = stripObfuscationZeroWidth(text);
   const match = normalized.match(
     /^[\s\S]*?\[Tool call:\s*([^\]\n]+)\]\s*\nArguments:\s*([\s\S]+?)\s*$/
   );
@@ -143,21 +148,24 @@ export function translateNonStreamingResponse(
   targetFormat: string,
   sourceFormat: string,
   toolNameMap?: Map<string, string> | null,
-  toolSchemas?: Map<string, JsonRecord> | null
+  toolSchemas?: Map<string, JsonRecord> | null,
+  requestedThinking?: boolean
 ): JsonRecord;
 export function translateNonStreamingResponse(
   responseBody: unknown,
   targetFormat: string,
   sourceFormat: string,
   toolNameMap?: Map<string, string> | null,
-  toolSchemas?: Map<string, JsonRecord> | null
+  toolSchemas?: Map<string, JsonRecord> | null,
+  requestedThinking?: boolean
 ): unknown;
 export function translateNonStreamingResponse(
   responseBody: unknown,
   targetFormat: string,
   sourceFormat: string,
   toolNameMap?: Map<string, string> | null,
-  toolSchemas?: Map<string, JsonRecord> | null
+  toolSchemas?: Map<string, JsonRecord> | null,
+  requestedThinking?: boolean
 ): unknown {
   // If already in source format, return as-is
   if (targetFormat === sourceFormat) {
@@ -165,6 +173,10 @@ export function translateNonStreamingResponse(
       restoreOpenAIToolNames(responseBody, toolNameMap);
     }
     return responseBody;
+  }
+
+  if (targetFormat === FORMATS.CLAUDE && sourceFormat === FORMATS.OPENAI_RESPONSES) {
+    return convertClaudeNonStreamingToResponses(toRecord(responseBody), toolNameMap);
   }
 
   let intermediateOpenAI = responseBody;
@@ -265,7 +277,15 @@ export function translateNonStreamingResponse(
     if (toolCalls.length > 0) {
       message.tool_calls = toolCalls;
     }
-    if (message.content === undefined) {
+    if (
+      (!message.content ||
+        (typeof message.content === "string" && message.content.trim().length === 0)) &&
+      toolCalls.length === 0 &&
+      replayableReasoningContent &&
+      replayableReasoningContent.trim().length > 0
+    ) {
+      message.content = replayableReasoningContent;
+    } else if (message.content === undefined) {
       message.content = "";
     }
 
@@ -311,10 +331,15 @@ export function translateNonStreamingResponse(
         promptTokensDetails.cached_tokens,
         usage.cache_read_input_tokens
       );
+      // `cache_write_tokens` is the alias emitted by the codex-chatgpt-web bridge
+      // (input_tokens_details) and by OpenRouter/Devin Desktop (top level).
       const cacheCreationInputTokens = firstPositiveNumber(
         inputTokensDetails.cache_creation_tokens,
         promptTokensDetails.cache_creation_tokens,
-        usage.cache_creation_input_tokens
+        usage.cache_creation_input_tokens,
+        inputTokensDetails.cache_write_tokens,
+        promptTokensDetails.cache_write_tokens,
+        usage.cache_write_tokens
       );
       const reasoningTokens = firstPositiveNumber(
         outputTokensDetails.reasoning_tokens,
@@ -532,7 +557,10 @@ export function translateNonStreamingResponse(
   else if (targetFormat === FORMATS.CLAUDE) {
     const root = toRecord(responseBody);
     const contentBlocks = Array.isArray(root.content) ? root.content : [];
-    if (contentBlocks.length > 0) {
+    // A truncated completion arrives as content:[] with stop_reason max_tokens.
+    // Skipping the branch on an empty array drops the body untranslated, so the
+    // chat empty-output check sees the raw Claude spelling instead of length.
+    if (contentBlocks.length > 0 || root.stop_reason != null) {
       let textContent = "";
       let thinkingContent = "";
       const toolCalls: JsonRecord[] = [];
@@ -554,6 +582,22 @@ export function translateNonStreamingResponse(
               arguments: JSON.stringify(blockObj.input || {}),
             },
           });
+        }
+      }
+
+      // #13558: MiniMax-M3's Anthropic-compatible endpoint puts its reasoning
+      // inline as <think>...</think> inside an ordinary "text" content block
+      // instead of a structured "thinking" block, so it never hit the
+      // thinkingContent accumulation above. Strip any such markup out of the
+      // accumulated text and merge it into thinkingContent, gated the same
+      // way the streaming/passthrough paths already are.
+      if (textContent && shouldParseTextualReasoningTags(undefined, root.model)) {
+        const extracted = extractThinkingFromContent(textContent);
+        textContent = extracted.content;
+        if (extracted.thinking) {
+          thinkingContent = thinkingContent
+            ? `${thinkingContent}\n\n${extracted.thinking}`
+            : extracted.thinking;
         }
       }
 
@@ -587,6 +631,10 @@ export function translateNonStreamingResponse(
       let finishReason = toString(root.stop_reason, "stop");
       if (finishReason === "end_turn") finishReason = "stop";
       if (finishReason === "tool_use") finishReason = "tool_calls";
+      // Streaming claude-to-openai already maps this (convertStopReason). Leaving
+      // the raw spelling here makes a truncated completion look like an unknown
+      // finish to the chat empty-output check.
+      if (finishReason === "max_tokens") finishReason = "length";
 
       const result: JsonRecord = {
         id: `chatcmpl-${toString(root.id, String(Date.now()))}`,
@@ -641,7 +689,11 @@ export function translateNonStreamingResponse(
 
   // Phase 3: Translate from OpenAI back to Client Source format
   if (sourceFormat === FORMATS.CLAUDE && sourceFormat !== targetFormat) {
-    return convertOpenAINonStreamingToClaude(toRecord(intermediateOpenAI), toolNameMap ?? null);
+    return convertOpenAINonStreamingToClaude(
+      toRecord(intermediateOpenAI),
+      toolNameMap ?? null,
+      requestedThinking
+    );
   }
 
   // Gemini-family clients (Gemini, Antigravity): the streaming SSE path already
@@ -660,6 +712,96 @@ export function translateNonStreamingResponse(
 
   // Return intermediateOpenAI (which is either the raw response if unknown targetFormat, or an OpenAI compatible payload)
   return intermediateOpenAI;
+}
+
+function convertClaudeNonStreamingToResponses(
+  response: JsonRecord,
+  toolNameMap?: Map<string, string> | null
+): JsonRecord {
+  const responseId = `resp_${toString(response.id, String(Date.now()))}`;
+  const content = Array.isArray(response.content) ? response.content : [];
+  const output: JsonRecord[] = [];
+
+  for (let index = 0; index < content.length; index += 1) {
+    const block = toRecord(content[index]);
+    const outputIndex = index;
+
+    if (block.type === "thinking") {
+      const summaryText = toString(block.thinking);
+      const reasoning: JsonRecord = {
+        id: `rs_${responseId}_${outputIndex}`,
+        type: "reasoning",
+        summary: summaryText ? [{ type: "summary_text", text: summaryText }] : [],
+      };
+      const signature = toString(block.signature);
+      if (signature) reasoning.encrypted_content = signature;
+      output.push(reasoning);
+      continue;
+    }
+
+    if (block.type === "redacted_thinking") {
+      const encryptedContent = toString(block.data);
+      const reasoning: JsonRecord = {
+        id: `rs_${responseId}_${outputIndex}`,
+        type: "reasoning",
+        summary: [],
+      };
+      if (encryptedContent) reasoning.encrypted_content = encryptedContent;
+      output.push(reasoning);
+      continue;
+    }
+
+    if (block.type === "text") {
+      output.push({
+        id: `msg_${responseId}_${outputIndex}`,
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: toString(block.text),
+            annotations: [],
+            logprobs: [],
+          },
+        ],
+      });
+      continue;
+    }
+
+    if (block.type === "tool_use") {
+      const callId = toString(block.id, `call_${Date.now()}_${output.length}`);
+      const rawName = toString(block.name);
+      output.push({
+        id: `fc_${callId}`,
+        type: "function_call",
+        call_id: callId,
+        name: toolNameMap?.get(rawName) ?? rawName,
+        arguments: JSON.stringify(block.input ?? {}),
+      });
+    }
+  }
+
+  const usage = toRecord(response.usage);
+  const inputTokens = toNumber(usage.input_tokens, 0);
+  const outputTokens = toNumber(usage.output_tokens, 0);
+  const result: JsonRecord = {
+    id: responseId,
+    object: "response",
+    created_at: toNumber(response.created_at, 0),
+    status: "completed",
+    model: toString(response.model, "claude"),
+    output,
+  };
+
+  if (Object.keys(usage).length > 0) {
+    result.usage = {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens,
+    };
+  }
+
+  return result;
 }
 
 /**
@@ -687,7 +829,8 @@ function resolveReasoningText(messageObj: JsonRecord): string {
  */
 function convertOpenAINonStreamingToClaude(
   openaiResponse: JsonRecord,
-  toolNameMap?: Map<string, string> | null
+  toolNameMap?: Map<string, string> | null,
+  requestedThinking?: boolean
 ): JsonRecord {
   const choices = openaiResponse.choices as unknown[] | undefined;
   const isChoicesArray = Array.isArray(choices);
@@ -704,7 +847,16 @@ function convertOpenAINonStreamingToClaude(
   let hasTextOrReasoning = false;
 
   const reasoningText = resolveReasoningText(messageObj);
-  if (reasoningText) {
+  // `requestedThinking === false` (client explicitly opted out): mirror the
+  // streaming translator's gate. When ordinary content is present, reasoning
+  // is suppressed entirely (no thinking leak). When the response is
+  // reasoning-ONLY (empty content — the GLM-5.2 autocompact pattern), relay
+  // reasoning as an ordinary text block so the response is not empty (no 502)
+  // and no thinking block leaks to a thinking-opt-out client.
+  // `requestedThinking === undefined` (legacy callers that do not pass it)
+  // keeps the original "always a thinking block" relay.
+  const suppressThinking = requestedThinking === false;
+  if (reasoningText && !suppressThinking) {
     hasTextOrReasoning = true;
     content.push({
       type: "thinking",
@@ -721,6 +873,16 @@ function convertOpenAINonStreamingToClaude(
     content.push({
       type: "text",
       text: resolvedText === "" ? "(empty response)" : resolvedText,
+    });
+  } else if (suppressThinking && reasoningText) {
+    // Reasoning-ONLY response with thinking opted out (requestedThinking===false):
+    // no ordinary content, reasoning suppressed above. Relay the reasoning text as
+    // an ordinary text block so the response is not empty (no 502) and no thinking
+    // block leaks — mirrors the streaming translator's finish-time fallback.
+    hasTextOrReasoning = true;
+    content.push({
+      type: "text",
+      text: reasoningText,
     });
   } else if (!hasTextOrReasoning) {
     content.push({

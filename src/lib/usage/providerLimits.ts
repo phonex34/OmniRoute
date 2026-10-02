@@ -1,3 +1,4 @@
+import { syncCodexQuotaObservation } from "@/lib/db/providers/codexAccountRecovery";
 import {
   getProviderConnectionById,
   getProviderConnections,
@@ -11,26 +12,19 @@ import {
   setProviderLimitsCacheBatch,
   type ProviderLimitsCacheEntry,
 } from "@/lib/db/providerLimits";
+import { getLatestQuotaSnapshotsForConnection } from "@/lib/db/quotaSnapshots";
+import type { QuotaSnapshotRow } from "@/shared/types/utilization";
 import { syncToCloud } from "@/lib/cloudSync";
 import { setQuotaCache } from "@/domain/quotaCache";
-import {
-  buildClaudeExtraUsageConnectionUpdate,
-  CLAUDE_EXTRA_USAGE_ERROR_SOURCE,
-  isClaudeExtraUsageBlockEnabled,
-  isClaudeExtraUsageQueued,
-} from "@/lib/providers/claudeExtraUsage";
-import { isConnectionUnavailableToAuxiliaryActivity } from "@/lib/exclusiveLeaseIsolation";
+import { buildClaudeExtraUsageConnectionUpdate } from "@/lib/providers/claudeExtraUsage";
 import { clearRecoveredProviderState } from "@/sse/services/auth";
 import { getMachineId } from "@/shared/utils/machine";
-import { USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
+import { supportsProviderQuota } from "@/shared/utils/providerQuotaVisibility";
 import { mergeProviderLimitsCacheEntry, toProviderLimitsCacheEntry } from "./providerLimitsCache";
-import { getExecutor } from "@omniroute/open-sse/executors/index.ts";
+import { getCredentialRefreshExecutor } from "@omniroute/open-sse/executors/credential.ts";
 import { getUsageForProvider } from "@omniroute/open-sse/services/usage.ts";
 import { cooldownUntilMs } from "@omniroute/open-sse/services/accountFallback.ts";
-import {
-  rotationGroupFor,
-  serializeRefresh,
-} from "@omniroute/open-sse/services/refreshSerializer.ts";
+import { rotationGroupFor } from "@omniroute/open-sse/services/refreshSerializer.ts";
 import {
   extractCodeAssistOnboardTierId,
   extractCodeAssistSubscriptionTier,
@@ -48,28 +42,14 @@ import {
   sanitizeUsageQuotasForProvider,
 } from "./providerLimits/quotaNormalize";
 import { syncInChunksWithSpacing } from "./providerLimits/chunkedSpacingSync";
+import {
+  refreshAndUpdateCredentialsWithResolver,
+  type CredentialRefreshOptions,
+  type ProviderConnectionLike,
+} from "./providerLimits/credentialRefresh";
+export { shouldAttemptRotatingRefresh } from "./providerLimits/credentialRefresh";
 type JsonRecord = Record<string, unknown>;
 type SyncSource = "manual" | "scheduled";
-
-interface ProviderConnectionLike {
-  id: string;
-  provider: string;
-  authType?: string;
-  accessToken?: string;
-  refreshToken?: string;
-  expiresAt?: string;
-  tokenExpiresAt?: string;
-  providerSpecificData?: JsonRecord;
-  testStatus?: string;
-  isActive?: boolean;
-  lastError?: string | null;
-  lastErrorAt?: string | null;
-  lastErrorType?: string | null;
-  lastErrorSource?: string | null;
-  errorCode?: string | number | null;
-  rateLimitedUntil?: string | null;
-  backoffLevel?: number;
-}
 
 const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set([
   "glm",
@@ -100,6 +80,11 @@ const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set([
   "hyperagent",
   "ha",
   "firecrawl",
+  // Context7 rate limit quota (ratelimit-* headers of GET https://context7.com/api/v1/search)
+  "context7",
+  // Tavily API key → /usage account & plan credits
+  "tavily-search",
+  "tavily",
   // Volcano Ark Plan subscriptions (agent-plan / coding-plan)
   "volcengine-agent-plan",
   "volcengine-coding-plan",
@@ -112,11 +97,96 @@ const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set([
   "qwen-cloud-token-plan",
   // AgentRouter (New-API) console System Access Token + New-Api-User id (providerSpecificData)
   "agentrouter",
+  // OpenRouter API key → /key limits + /credits account balance
+  "openrouter",
+  // LLM Gateway API key (llmgtwy_…) → GET /v1/key DevPass allowance
+  "llmgateway",
+  // Lyceum API key (lk_…) → GET /api/v2/external/billing/credits balance
+  "lyceum",
 ]);
 const DEFAULT_PROVIDER_LIMITS_SYNC_INTERVAL_MINUTES = 70;
 const PROVIDER_LIMITS_AUTO_SYNC_SETTING_KEY = "provider_limits_auto_sync_last_run";
 const DEFAULT_PROVIDER_LIMITS_POST_USAGE_REFRESH_DELAY_MS = 5_000;
 const pendingPostUsageRefreshes = new Set<string>();
+
+/**
+ * Pure reshape of `quota_snapshots` rows into the card's `quotas` map plus the
+ * newest row timestamp. Exported for unit testing.
+ *
+ * getLatestQuotaSnapshotsForConnection runs rows through rowToCamel, so fields
+ * arrive camelCase at runtime despite the snake_case row type — reading only
+ * snake_case silently dropped every window and defeated the whole fallback
+ * (the "Refresh now shows hours-old data" bug). Read both shapes defensively.
+ */
+export function snapshotRowsToQuotas(rows: readonly QuotaSnapshotRow[] | null | undefined): {
+  quotas: Record<string, unknown>;
+  newestMs: number;
+} {
+  const quotas: Record<string, unknown> = {};
+  let newestMs = 0;
+  if (!rows) return { quotas, newestMs };
+
+  for (const row of rows) {
+    const r = row as QuotaSnapshotRow & {
+      windowKey?: string;
+      remainingPercentage?: number | null;
+      nextResetAt?: string | null;
+      createdAt?: string;
+    };
+    const windowKey = r.windowKey ?? r.window_key;
+    if (!windowKey) continue;
+    const remainingRaw = r.remainingPercentage ?? r.remaining_percentage ?? 0;
+    const remaining = Math.max(0, Math.min(100, Number(remainingRaw)));
+    quotas[windowKey] = {
+      used: 100 - remaining,
+      total: 100,
+      remaining,
+      remainingPercentage: remaining,
+      resetAt: r.nextResetAt ?? r.next_reset_at ?? null,
+      unlimited: false,
+    };
+    const createdVal = r.createdAt ?? r.created_at;
+    const createdMs = createdVal ? Date.parse(createdVal) : NaN;
+    if (Number.isFinite(createdMs)) newestMs = Math.max(newestMs, createdMs);
+  }
+  return { quotas, newestMs };
+}
+
+/**
+ * Reconstruct a cache entry from the freshest `quota_snapshots` rows when a live
+ * fetch fails (429 / cooldown). The snapshots table is refreshed ~1 min by the
+ * quotaCache tick, so it is far newer than a key_value entry frozen at the last
+ * successful full fetch — this is why "Refresh now" kept showing hours-old data
+ * while the account was rate-limited. Returns null when no snapshot is newer
+ * than the prior entry, so the caller keeps its existing fallback.
+ */
+export function snapshotCacheEntry(
+  connectionId: string,
+  previous: ProviderLimitsCacheEntry | null
+): ProviderLimitsCacheEntry | null {
+  let rows;
+  try {
+    rows = getLatestQuotaSnapshotsForConnection(connectionId);
+  } catch {
+    return null;
+  }
+  if (!rows || rows.length === 0) return null;
+
+  const { quotas, newestMs } = snapshotRowsToQuotas(rows);
+  if (Object.keys(quotas).length === 0 || newestMs === 0) return null;
+
+  const previousMs = previous?.fetchedAt ? Date.parse(previous.fetchedAt) : NaN;
+  if (Number.isFinite(previousMs) && newestMs <= previousMs) return null;
+
+  return {
+    quotas: quotas as ProviderLimitsCacheEntry["quotas"],
+    plan: previous?.plan ?? null,
+    message: null,
+    fetchedAt: new Date(newestMs).toISOString(),
+    source: "scheduled",
+    bankedResetCredits: previous?.bankedResetCredits,
+  };
+}
 
 function getProviderLimitsPostUsageRefreshDelayMs(): number {
   const raw = Number(process.env.PROVIDER_LIMITS_POST_USAGE_REFRESH_DELAY_MS ?? "");
@@ -195,19 +265,14 @@ function shouldRefreshProviderLimitsCache(
 }
 
 export function isSupportedUsageConnection(connection: ProviderConnectionLike | null): boolean {
-  if (
-    !connection ||
-    !connection.provider ||
-    !USAGE_SUPPORTED_PROVIDERS.includes(connection.provider)
-  ) {
-    return false;
-  }
+  if (!connection?.provider) return false;
 
-  if (connection.authType === "oauth") return true;
-  return (
-    (connection.authType === "apikey" || connection.authType === "api_key") &&
-    PROVIDER_LIMITS_APIKEY_PROVIDERS.has(connection.provider)
-  );
+  if (connection.authType === "oauth") {
+    return supportsProviderQuota(connection.provider, connection);
+  }
+  if (connection.authType !== "apikey" && connection.authType !== "api_key") return false;
+  if (PROVIDER_LIMITS_APIKEY_PROVIDERS.has(connection.provider)) return true;
+  return supportsProviderQuota(connection.provider, connection);
 }
 
 function withStatus(error: Error, status: number): Error & { status: number } {
@@ -224,122 +289,11 @@ async function syncToCloudIfEnabled() {
   }
 }
 
-/**
- * Whether the quota path may refresh this provider's token. Exported for testing.
- *
- * Rotating-refresh providers (Codex/OpenAI share one Auth0 client_id, etc.) mint a
- * single-use refresh_token on every refresh. The BULK quota-sync path runs many
- * connections concurrently; refreshing sibling accounts in parallel makes Auth0
- * revoke the whole token family (openai/codex#9648) and kills every account but
- * the last (#3019). So the bulk path never refreshes rotating providers
- * (`allowRotatingRefresh` falsy). The on-demand, per-connection path opts in and
- * is made safe by `serializeRefresh` (one token mint at a time per rotation group,
- * so even N concurrent per-account requests can never refresh siblings in
- * parallel). Non-rotating providers are always eligible.
- */
-export function shouldAttemptRotatingRefresh(
-  provider: string,
-  allowRotatingRefresh: boolean | undefined
-): boolean {
-  if (rotationGroupFor(provider) === null) return true;
-  return allowRotatingRefresh === true;
-}
-
 export async function refreshAndUpdateCredentials(
   connection: ProviderConnectionLike,
-  opts: { allowRotatingRefresh?: boolean; force?: boolean } = {}
+  opts: CredentialRefreshOptions = {}
 ) {
-  if (!shouldAttemptRotatingRefresh(connection.provider, opts.allowRotatingRefresh)) {
-    return { connection, refreshed: false };
-  }
-  const executor = await getExecutor(connection.provider);
-  const credentials = {
-    connectionId: connection.id,
-    accessToken: connection.accessToken,
-    refreshToken: connection.refreshToken,
-    expiresAt: connection.tokenExpiresAt || connection.expiresAt || null,
-    providerSpecificData: connection.providerSpecificData,
-    copilotToken: connection.providerSpecificData?.copilotToken,
-    copilotTokenExpiresAt: connection.providerSpecificData?.copilotTokenExpiresAt,
-  };
-
-  // `force` is used ONLY on the reactive 401 recovery path (a usage fetch came
-  // back unauthorized) — it bypasses the proactive `needsRefresh` heuristic so
-  // imported accounts (expiresAt=null, where needsRefresh is always false) can
-  // still re-mint. The mint stays serialized per rotation group; this never
-  // refreshes proactively from the bulk path (#3019 guard above is unchanged).
-  if (!opts.force && !executor.needsRefresh(credentials)) {
-    return { connection, refreshed: false };
-  }
-
-  // Serialize the actual token mint per rotation group so two sibling accounts
-  // never hit Auth0 concurrently (passthrough for non-rotating providers).
-  const refreshResult = (await serializeRefresh(connection.provider, () =>
-    executor.refreshCredentials(credentials, console)
-  )) as
-    | (JsonRecord & {
-        accessToken?: string;
-        refreshToken?: string;
-        expiresIn?: number;
-        expiresAt?: string;
-        copilotToken?: string;
-        copilotTokenExpiresAt?: string;
-      })
-    | null;
-
-  if (!refreshResult) {
-    // Refresh failed but we still have an accessToken — fall back to the
-    // existing token for ANY OAuth provider (graceful degradation) instead of
-    // hard-failing. Previously this was qualified to `provider === "github"`,
-    // which left every other provider stuck on a transient refresh failure even
-    // when a usable access token was still on hand.
-    if (connection.accessToken) {
-      return { connection, refreshed: false };
-    }
-    throw withStatus(
-      new Error("Failed to refresh credentials. Please re-authorize the connection."),
-      401
-    );
-  }
-
-  const updateData: JsonRecord = {
-    updatedAt: new Date().toISOString(),
-  };
-
-  if (refreshResult.accessToken) {
-    updateData.accessToken = refreshResult.accessToken;
-  }
-  if (refreshResult.refreshToken) {
-    updateData.refreshToken = refreshResult.refreshToken;
-  }
-  if (refreshResult.expiresIn) {
-    const expiresAt = new Date(Date.now() + refreshResult.expiresIn * 1000).toISOString();
-    updateData.expiresAt = expiresAt;
-    updateData.tokenExpiresAt = expiresAt;
-  } else if (refreshResult.expiresAt) {
-    updateData.expiresAt = refreshResult.expiresAt;
-    updateData.tokenExpiresAt = refreshResult.expiresAt;
-  }
-  if (refreshResult.copilotToken || refreshResult.copilotTokenExpiresAt) {
-    updateData.providerSpecificData = {
-      ...(connection.providerSpecificData || {}),
-      copilotToken: refreshResult.copilotToken,
-      copilotTokenExpiresAt: refreshResult.copilotTokenExpiresAt,
-    };
-  }
-
-  await updateProviderConnection(connection.id, updateData);
-
-  return {
-    connection: {
-      ...connection,
-      ...updateData,
-      providerSpecificData:
-        (updateData.providerSpecificData as JsonRecord | undefined) ||
-        connection.providerSpecificData,
-    },
-    refreshed: true,
-  };
+  return refreshAndUpdateCredentialsWithResolver(connection, getCredentialRefreshExecutor, opts);
 }
 
 function isUsageAuthError(message: unknown): boolean {
@@ -443,60 +397,34 @@ export function hasUsableQuota(usage: JsonRecord): boolean {
   return false;
 }
 
-// A window "still blocks" recovery when it governs quota and is either still
-// exhausted with a real reset that hasn't passed yet, or exhausted with no
-// parseable real reset at all (unknown-reset windows stay locked, matching
-// the pre-existing kimi-coding partial-refresh semantics).
-function windowStillExhaustedAfterRealReset(value: unknown, nowMs: number): boolean {
-  if (!isRecord(value)) return false;
-  if (value.unlimited === true) return false;
-  const remaining =
-    typeof value.remaining === "number"
-      ? value.remaining
-      : typeof value.remainingPercentage === "number"
-        ? value.remainingPercentage
-        : null;
-  if (remaining !== null && remaining > 0) return false;
-  if (value.resetAt == null) return true;
-  const resetMs = Date.parse(String(value.resetAt));
-  if (Number.isNaN(resetMs)) return true;
-  return resetMs > nowMs;
-}
-
-/**
- * May an active cooldown be released because the REAL quota windows recovered?
- *
- * Only the synthetic-cooldown case (#10534) qualifies: lastErrorType
- * "quota_exhausted" plus every governing window past its real reset with quota
- * left. A window that is still exhausted — or whose reset is unknown/unparseable
- * — keeps the connection locked, matching the kimi-coding partial-refresh
- * semantics.
- */
-function isQuotaExhaustedCooldownReleasable(
-  connection: Pick<
-    ProviderConnectionLike,
-    "lastErrorType" | "lastErrorSource" | "provider" | "providerSpecificData"
-  >,
-  usage: JsonRecord
+// A SYNTHETIC cooldown (persisted by a poller without a parseable upstream
+// reset — e.g. the Claude-subscription SUBSCRIPTION_QUOTA_COOLDOWN_MS lock) may
+// be overruled only by POSITIVE live-window evidence: EVERY reported quota
+// window is replenished (remaining > 0) AND carries a documented reset
+// timestamp that has already elapsed. Unknown-reset windows never authorize an
+// override (matching the kimi-coding partial-refresh semantics);
+// `unlimited` windows carry no reset evidence and are rejected.
+export function syntheticCooldownOutlivedByRealWindows(
+  usage: JsonRecord,
+  nowMs: number = Date.now()
 ): boolean {
-  if (connection.lastErrorType !== "quota_exhausted") return false;
-  // An extra-usage block is a POLICY lock, not a quota window: the session and
-  // weekly windows genuinely look recovered in the very same fetch, so the
-  // window scan below would happily release it. It stays locked while the
-  // policy is on and upstream still reports extra usage queued.
-  if (
-    connection.lastErrorSource === CLAUDE_EXTRA_USAGE_ERROR_SOURCE &&
-    isClaudeExtraUsageBlockEnabled(connection.provider, connection.providerSpecificData) &&
-    isClaudeExtraUsageQueued(usage)
-  ) {
-    return false;
+  if (!isRecord(usage) || !isRecord(usage.quotas)) return false;
+  const windows = Object.values(usage.quotas);
+  if (windows.length === 0) return false;
+  for (const value of windows) {
+    if (!isRecord(value) || value.unlimited === true) return false;
+    const remaining =
+      typeof value.remaining === "number"
+        ? value.remaining
+        : typeof value.remainingPercentage === "number"
+          ? value.remainingPercentage
+          : null;
+    if (remaining === null || remaining <= 0) return false;
+    if (value.resetAt == null) return false;
+    const resetMs = Date.parse(String(value.resetAt));
+    if (Number.isNaN(resetMs) || resetMs > nowMs) return false;
   }
-  const quotas = usage?.quotas;
-  if (!isRecord(quotas)) return false;
-  const values = Object.values(quotas);
-  if (values.length === 0) return false;
-  const nowMs = Date.now();
-  return !values.some((value) => windowStillExhaustedAfterRealReset(value, nowMs));
+  return true;
 }
 
 /**
@@ -543,6 +471,40 @@ export function shouldClearErrorStateOnValidProbe(
   return probeValid && !hasActiveCooldown(connection, now);
 }
 
+/**
+ * May an active cooldown be released because the REAL quota windows recovered?
+ *
+ * Only the synthetic-cooldown case (#10534) qualifies: lastErrorType
+ * "quota_exhausted" plus every governing window past its real reset with quota
+ * left. A window that is still exhausted — or whose reset is unknown/unparseable
+ * — keeps the connection locked, matching the kimi-coding partial-refresh
+ * semantics.
+ */
+
+/**
+ * Is an explicit cooldown still in the future?
+ *
+ * A rateLimitedUntil set by the upstream 429 handler is a hard statement and
+ * must never be overruled by a quota poll.
+ *
+ * Gate on the timestamp alone; lastErrorType stays irrelevant here.
+ */
+
+/**
+ * Whether a connection test may wipe the persisted error/cooldown state.
+ *
+ * A successful probe proves the CREDENTIAL is valid; it does not prove an
+ * exhausted quota window reopened — the probe is a cheap auth/models call that
+ * never touches the chat quota a weekly cap applies to. The credential-health
+ * scheduler runs that probe against every connection every 300s, so without this
+ * gate a weekly-capped connection was reset to `active` / `rateLimitedUntil=null`
+ * within 30s of every restart and dispatched straight back into the same 429.
+ *
+ * Same rule as `maybeClearRecoveredQuotaState`: a future `rateLimitedUntil` is
+ * the 429 handler's hard statement and no poller may overrule it. Once the
+ * window elapses, the next probe clears the state normally.
+ */
+
 export async function maybeClearRecoveredQuotaState(
   connection: ProviderConnectionLike,
   usage: JsonRecord
@@ -550,17 +512,17 @@ export async function maybeClearRecoveredQuotaState(
   if (!hasUsableQuota(usage)) return connection;
   if (isTerminalStatusForQuotaRecovery(connection.testStatus)) return connection;
   if (hasActiveCooldown(connection)) {
-    // #11355 made an active rateLimitedUntil an unconditional stop, which is right
-    // for an upstream-derived cooldown but over-broad for the one case #10534 was
-    // built for: a Claude-subscription 429 persists a SYNTHETIC 1h cooldown because
-    // the upstream sent no parseable reset. When the later poll shows every window
-    // that governs this connection has really reset WITH quota available, holding
-    // that synthetic cooldown just deadlocks the connection for an hour.
-    //
-    // Narrow by design: only lastErrorType "quota_exhausted" (the synthetic-cooldown
-    // writer) is eligible, and a single still-exhausted or unknown-reset window keeps
-    // the lock. Every other reason keeps #11355/#11277 semantics untouched.
-    if (!isQuotaExhaustedCooldownReleasable(connection, usage)) return connection;
+    // A future rateLimitedUntil written from a real upstream signal is a hard
+    // statement no poller may overrule (#11277) — executor-sourced rate limits
+    // and extra-usage policy blocks included. Only a SYNTHETIC cooldown (a
+    // quota_exhausted lock persisted without an upstream reset, e.g. the
+    // Claude-subscription poller's 1h lockout) yields to positive live-window
+    // evidence that the real quota has already replenished past its reset.
+    const syntheticRecoveryOverride =
+      connection.lastErrorType === "quota_exhausted" &&
+      connection.lastErrorSource !== "extra_usage" &&
+      syntheticCooldownOutlivedByRealWindows(usage);
+    if (!syntheticRecoveryOverride) return connection;
   }
 
   const hasTransientState =
@@ -856,9 +818,6 @@ async function fetchLiveProviderLimitsWithOptions(
   connection: ProviderConnectionLike;
   usage: JsonRecord;
 }> {
-  if (await isConnectionUnavailableToAuxiliaryActivity(connectionId)) {
-    throw withStatus(new Error("Usage refresh deferred while an exclusive lease is active"), 409);
-  }
   let connection = (await getProviderConnectionById(
     connectionId
   )) as unknown as ProviderConnectionLike | null;
@@ -882,7 +841,12 @@ async function fetchLiveProviderLimitsWithOptions(
       )) as JsonRecord
     );
     if (isRecord(usage.quotas)) {
-      setQuotaCache(connectionId, connection.provider, usage.quotas);
+      setQuotaCache(
+        connectionId,
+        connection.provider,
+        usage.quotas,
+        isRecord(usage.modelQuotas) ? usage.modelQuotas : {}
+      );
     }
     connection = await syncExpiredStatusIfNeeded(connection, usage);
     connection = await syncClaudeExtraUsageStateIfNeeded(connection, usage);
@@ -996,8 +960,21 @@ async function fetchLiveProviderLimitsWithOptions(
     result = await fetchUsageWithContext(null);
   }
 
+  if (connection.provider === "codex") {
+    const data = await syncCodexQuotaObservation(
+      connection.id,
+      result.usage,
+      connection.providerSpecificData
+    );
+    if (data) connection = { ...connection, providerSpecificData: data };
+  }
   if (isRecord(result.usage.quotas)) {
-    setQuotaCache(connectionId, connection.provider, result.usage.quotas);
+    setQuotaCache(
+      connectionId,
+      connection.provider,
+      result.usage.quotas,
+      isRecord(result.usage.modelQuotas) ? result.usage.modelQuotas : {}
+    );
   }
   connection = await syncExpiredStatusIfNeeded(connection, result.usage);
   connection = await syncClaudeExtraUsageStateIfNeeded(connection, result.usage);
@@ -1030,19 +1007,39 @@ export async function fetchAndPersistProviderLimits(
 
   // Don't persist error-only entries (429 etc.) — would wipe prior good cache.
   // Serve the prior entry instead; only successful fetches update the cache.
-  if (cache === previous && newCache.message) {
-    const staleUsage: JsonRecord = {
-      ...usage,
-      quotas: previous.quotas,
-      plan: previous.plan ?? usage.plan ?? null,
-      bankedResetCredits: previous.bankedResetCredits,
-      billing: previous.billing,
-      message: null,
-      _stale: true,
-      _staleSince: previous.fetchedAt,
-      _staleReason: newCache.message,
-    };
-    return { connection, usage: staleUsage, cache: previous };
+  const fetchFailed = !newCache.quotas && newCache.message;
+  if (fetchFailed) {
+    // Prefer the freshest snapshot over the frozen key_value entry so a
+    // rate-limited "Refresh now" still shows near-current data.
+    const snapshot = snapshotCacheEntry(connectionId, previous);
+    const fallback = snapshot ?? previous;
+    if (fallback?.quotas && Object.keys(fallback.quotas).length > 0) {
+      // snapshotCacheEntry only returns non-null when the snapshot is strictly
+      // newer than the key_value entry, so persisting it is a genuine forward
+      // update (not a 429 error overwrite). Without this write the key_value
+      // cache stays frozen while quota_snapshots keeps advancing, so a tab
+      // reload reverts to hours-old data even though "Refresh now" showed fresh.
+      if (snapshot) {
+        setProviderLimitsCache(connectionId, snapshot);
+      }
+      const staleUsage: JsonRecord = {
+        ...usage,
+        quotas: fallback.quotas,
+        // Snapshots only carry account-wide windows, so keep the last known
+        // display-only per-model buckets (Claude Fable) from the prior entry.
+        modelQuotas: previous?.modelQuotas,
+        plan: fallback.plan ?? usage.plan ?? null,
+        bankedResetCredits: fallback.bankedResetCredits,
+        billing: previous?.billing,
+        message: null,
+        fetchedAt: fallback.fetchedAt,
+        _stale: true,
+        _staleSince: fallback.fetchedAt,
+        _staleReason: newCache.message,
+      };
+      return { connection, usage: staleUsage, cache: fallback };
+    }
+    return { connection, usage: { ...usage, fetchedAt: newCache.fetchedAt }, cache: newCache };
   }
 
   const mergedUsage: JsonRecord = {
@@ -1069,16 +1066,7 @@ export async function syncAllProviderLimits(
   const connectionRows = (await getProviderConnections({
     isActive: true,
   })) as unknown as ProviderConnectionLike[];
-  const connections = (
-    await Promise.all(
-      connectionRows.map(async (connection) => ({
-        connection,
-        blocked: await isConnectionUnavailableToAuxiliaryActivity(connection.id),
-      }))
-    )
-  )
-    .filter(({ connection, blocked }) => isSupportedUsageConnection(connection) && !blocked)
-    .map(({ connection }) => connection);
+  const connections = connectionRows.filter(isSupportedUsageConnection);
   const cacheEntries: Array<{ connectionId: string; entry: ProviderLimitsCacheEntry }> = [];
   const caches: Record<string, ProviderLimitsCacheEntry> = {};
   const errors: Record<string, string> = {};
@@ -1089,9 +1077,24 @@ export async function syncAllProviderLimits(
   ) => {
     if (result.status === "fulfilled") {
       const { cache } = result.value;
-      const previous = getProviderLimitsCache(connectionId);
-      if (cache === previous) {
-        caches[connectionId] = cache;
+      // Don't persist error-only entries; show freshest snapshot, then prior
+      // cache, then pass through — so a rate-limited manual refresh still
+      // surfaces near-current data instead of an hours-old key_value entry.
+      if (!cache.quotas && cache.message) {
+        const previous = getProviderLimitsCache(connectionId);
+        const snapshot = snapshotCacheEntry(connectionId, previous);
+        const fallback = snapshot ?? previous;
+        if (fallback?.quotas && Object.keys(fallback.quotas).length > 0) {
+          caches[connectionId] = fallback;
+          // A non-null snapshot is strictly newer than key_value (see
+          // snapshotCacheEntry), so batch-persist it; otherwise key_value stays
+          // frozen and a tab reload reverts to stale data despite the refresh.
+          if (snapshot) {
+            cacheEntries.push({ connectionId, entry: snapshot });
+          }
+        } else {
+          caches[connectionId] = cache;
+        }
         return;
       }
       cacheEntries.push({ connectionId, entry: cache });
@@ -1143,6 +1146,7 @@ export async function syncAllProviderLimits(
 
   if (source === "scheduled") {
     await setLastProviderLimitsAutoSyncTime(new Date().toISOString());
+    emitScheduledUsageReport(connections, caches);
   }
 
   return {
@@ -1152,4 +1156,163 @@ export async function syncAllProviderLimits(
     caches,
     errors,
   };
+}
+
+export interface UsageReportWindow {
+  name: string;
+  displayName: string | null;
+  remainingPct: number | null;
+  used: number | null;
+  total: number | null;
+  resetAt: string | null;
+  unlimited: boolean;
+}
+
+export interface UsageReportAccountSummary {
+  provider: string;
+  account: string | null;
+  worstRemainingPct: number | null;
+  windows: UsageReportWindow[];
+}
+
+// Extract EVERY quota window of a cache entry (not just the worst) so the
+// report mirrors the Provider Quota page. Defensive: quota shapes vary per
+// provider, so each field is read guardedly and skipped when absent.
+function windowsFromCache(entry: ProviderLimitsCacheEntry | undefined): UsageReportWindow[] {
+  const quotas = entry?.quotas;
+  if (!quotas || typeof quotas !== "object") return [];
+  const out: UsageReportWindow[] = [];
+  for (const [windowKey, raw] of Object.entries(quotas as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object") continue;
+    const q = raw as {
+      displayName?: unknown;
+      remainingPercentage?: unknown;
+      remaining?: unknown;
+      used?: unknown;
+      total?: unknown;
+      unlimited?: unknown;
+      resetAt?: unknown;
+      message?: unknown;
+    };
+    if (windowKey === "error" || typeof q.message === "string") continue;
+    const pctRaw = q.remainingPercentage ?? q.remaining;
+    out.push({
+      name: windowKey,
+      displayName: typeof q.displayName === "string" ? q.displayName : null,
+      remainingPct: typeof pctRaw === "number" && Number.isFinite(pctRaw) ? pctRaw : null,
+      used: typeof q.used === "number" && Number.isFinite(q.used) ? q.used : null,
+      total: typeof q.total === "number" && Number.isFinite(q.total) ? q.total : null,
+      resetAt: typeof q.resetAt === "string" ? q.resetAt : null,
+      unlimited: q.unlimited === true,
+    });
+  }
+  // Tightest window first so the reader sees the most-depleted quota on top.
+  out.sort((a, b) => (a.remainingPct ?? Infinity) - (b.remainingPct ?? Infinity));
+  return out;
+}
+
+export interface UsageReportData {
+  intervalMinutes: number;
+  accountCount: number;
+  accounts: UsageReportAccountSummary[];
+}
+
+function buildUsageReportData(
+  connections: ProviderConnectionLike[],
+  caches: Record<string, ProviderLimitsCacheEntry>
+): UsageReportData {
+  const accounts: UsageReportAccountSummary[] = [];
+  for (const conn of connections) {
+    const windows = windowsFromCache(caches[conn.id]);
+    if (windows.length === 0) continue;
+    const worst = windows.reduce<number | null>((min, w) => {
+      if (w.unlimited || w.remainingPct === null) return min;
+      return min === null || w.remainingPct < min ? w.remainingPct : min;
+    }, null);
+    const email = (conn as { email?: string | null }).email ?? null;
+    accounts.push({
+      provider: conn.provider,
+      account: typeof email === "string" && email.trim() ? email : null,
+      worstRemainingPct: worst,
+      windows,
+    });
+  }
+  // Accounts with the tightest quota float to the top of the report.
+  accounts.sort((a, b) => (a.worstRemainingPct ?? Infinity) - (b.worstRemainingPct ?? Infinity));
+  return {
+    intervalMinutes: getProviderLimitsSyncIntervalMinutes(),
+    accountCount: accounts.length,
+    accounts,
+  };
+}
+
+function entryHasQuotaWindows(entry: ProviderLimitsCacheEntry | undefined | null): boolean {
+  return !!entry?.quotas && Object.keys(entry.quotas).length > 0;
+}
+
+// Pure best-of selection for one connection's report entry. Prefer a live
+// in-cycle result that actually carries quota windows, else the persisted cache
+// (only if it has windows), else the freshest quota_snapshots row, else the
+// in-cycle entry as-is. This is why a Claude account whose live poll returned 429
+// (error-only, no quotas) this cycle still appears with its last-good quota
+// instead of vanishing from the report. Exported for unit testing.
+export function mergeReportCacheEntry(
+  inCycle: ProviderLimitsCacheEntry | undefined | null,
+  persisted: ProviderLimitsCacheEntry | undefined | null,
+  snapshot: ProviderLimitsCacheEntry | undefined | null
+): ProviderLimitsCacheEntry | undefined {
+  if (entryHasQuotaWindows(inCycle)) return inCycle as ProviderLimitsCacheEntry;
+  if (entryHasQuotaWindows(persisted)) return persisted as ProviderLimitsCacheEntry;
+  return snapshot ?? inCycle ?? undefined;
+}
+
+function resolveReportCaches(
+  connections: ProviderConnectionLike[],
+  inCycle?: Record<string, ProviderLimitsCacheEntry>
+): Record<string, ProviderLimitsCacheEntry> {
+  const liveCaches = getCachedProviderLimitsMap();
+  const resolved: Record<string, ProviderLimitsCacheEntry> = {};
+  for (const conn of connections) {
+    const entry = mergeReportCacheEntry(
+      inCycle?.[conn.id],
+      liveCaches[conn.id],
+      snapshotCacheEntry(conn.id, null)
+    );
+    if (entry) resolved[conn.id] = entry;
+  }
+  return resolved;
+}
+
+function emitScheduledUsageReport(
+  connections: ProviderConnectionLike[],
+  caches: Record<string, ProviderLimitsCacheEntry>
+): void {
+  try {
+    const report = buildUsageReportData(connections, resolveReportCaches(connections, caches));
+    if (report.accountCount === 0) return;
+
+    import("@/lib/webhookDispatcher")
+      .then(({ notifyWebhookEvent }) => {
+        notifyWebhookEvent("usage.report", report as unknown as Record<string, unknown>);
+      })
+      .catch(() => {
+        /* report webhook is best-effort */
+      });
+  } catch {
+    /* never let reporting break the sync */
+  }
+}
+
+// Build a usage.report payload from the LATEST cached quota (in-memory cache,
+// falling back to the freshest quota_snapshots row) — NEVER triggers an
+// upstream fetch. Covers every active, usage-supported connection (OAuth and
+// API-key) that has cached quota. Returns null when nothing has quota yet.
+export async function buildUsageReportFromCache(): Promise<UsageReportData | null> {
+  const connections = (
+    (await getProviderConnections({ isActive: true })) as unknown as ProviderConnectionLike[]
+  ).filter(isSupportedUsageConnection);
+  if (connections.length === 0) return null;
+
+  const report = buildUsageReportData(connections, resolveReportCaches(connections));
+  return report.accountCount === 0 ? null : report;
 }

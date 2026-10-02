@@ -24,12 +24,21 @@ export interface ModelSpec {
   // Model ONLY supports adaptive thinking: manual extended thinking was removed. Sending
   // `thinking.type:"enabled"` or any `thinking.budget_tokens` returns HTTP 400; reasoning
   // is steered exclusively by `output_config.effort` (low/medium/high/xhigh/max). True for
-  // Claude Opus 4.7 and later (Opus 4.7/4.8/5, Fable 5). Per Anthropic's migration guide,
+  // Claude Opus 4.7 and later (Opus 4.7/4.8/5, Fable 5/5.1). Per Anthropic's migration guide,
   // any request that tries to set a fixed thinking budget gets a 400 error.
   adaptiveThinkingOnly?: boolean;
+  // The model rejects tool_choice values that require a tool call. Keep tools available,
+  // but normalize a forced choice to the default auto behavior before dispatch. Fable 5.1 always runs
+  // adaptive thinking, so forced tool use cannot be combined with any valid request.
+  rejectsForcedToolChoice?: boolean;
   // Highest effort accepted while `thinking.type:"disabled"` is present. Claude Opus 5
   // rejects disabled thinking with xhigh/max, while accepting it through high.
   maxEffortWhenThinkingDisabled?: "high";
+  // Model rejects `thinking.type:"disabled"` but accepts this value as its lowest thinking
+  // setting. Claude Sonnet 5.5 answers `disabled` with 400 "Use thinking.type.between_tools
+  // for the lowest thinking setting"; `between_tools` turns off up-front thinking, is valid
+  // only at effort low/medium/high, and takes no other thinking field.
+  disabledThinkingReplacement?: "between_tools";
   // Explicit operator override for the no-thinking gateway alias (Fase 8.1). When unset,
   // the catalog auto-advertises a `no-think/…` variant for
   // Claude-family thinking-capable models that honor `disabled`. Set `true` to force the
@@ -44,7 +53,17 @@ export interface ModelSpec {
   // operator strip-by-default a thinks-by-default model (measured: gemini-flash-lite
   // burns ~277 reasoning tokens on a plain request; `reasoning_effort:"none"` → 0)
   // without patching every client. See open-sse/services/defaultReasoningEffort.ts.
-  defaultReasoningEffort?: "none" | "low" | "medium" | "high";
+  //
+  // `"auto"` (#13448) is the per-model opt-in into adaptive reasoning effort: the
+  // literal value is injected here exactly like any other level, then
+  // chatCore/adaptiveEffortWiring.ts's wireAdaptiveEffort() recognizes it as an
+  // opt-in marker (never forwarded upstream verbatim) and resolves it to a
+  // concrete low/medium/high from the turn's request-shape signals. Without
+  // "auto" in this union, no operator could configure the per-model opt-in
+  // through the typed catalog at all -- open-sse/services/adaptiveEffort.ts's
+  // priority #3 and the wiring's modelDefaultAuto branch were unreachable
+  // except by a test constructing the body literal directly.
+  defaultReasoningEffort?: "none" | "low" | "medium" | "high" | "auto";
 }
 
 const BEDROCK_CLAUDE_ALIASES = (...modelIds: string[]) => [
@@ -67,10 +86,15 @@ const BEDROCK_CLAUDE_ALIASES = (...modelIds: string[]) => [
 // Keep native/bare Z.AI GLM-5.2 context authoritative, but do not blindly apply
 // it to every provider-wrapped alias: hosted providers can and do cap lower.
 const AUTHORITATIVE_CONTEXT_WINDOW_MODEL_IDS = new Set([
+  "glm-5.3-flash",
   "glm-5.3",
   "glm-5.3-high",
   "glm-5.3-low",
   "glm-5.3-max",
+  "glm-5.3-flash",
+  "glm-5.3-flash-high",
+  "glm-5.3-flash-low",
+  "glm-5.3-flash-max",
   "glm-5.2",
   "glm-5.2-high",
   "glm-5.2-max",
@@ -109,6 +133,12 @@ const GEMINI_36_FLASH_MODEL_SPEC = {
 } satisfies ModelSpec;
 
 export const MODEL_SPECS: Record<string, ModelSpec> = {
+  // Public model limits; the Codex registry supplies its smaller OAuth window.
+  // https://developers.openai.com/api/docs/models/gpt-6-astra
+  "gpt-6-astra": {
+    ...GPT_5_6_MODEL_SPEC,
+    aliases: ["openai/gpt-6-astra"],
+  },
   "gpt-5.6": {
     ...GPT_5_6_MODEL_SPEC,
     aliases: ["openai/gpt-5.6"],
@@ -172,9 +202,8 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     supportsTools: true,
     supportsVision: true,
   },
-  // ── Gemini 3.7 Flash (current Antigravity/AGY live tiers) ─────────
-  // The tier suffix configures the thinking budget passed to the upstream
-  // gemini-3.7-flash-tiered backend (high: 24.5k, medium: 8k, low: 1k).
+
+  // Gemini 3.7 Flash tiers: high 24.5k, medium 8k, low 1k thinking tokens.
   "gemini-3.7-flash-high": {
     maxOutputTokens: 65536,
     contextWindow: 1048576,
@@ -213,6 +242,53 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     aliases: ["gemini-3.7-flash-tiered"],
   },
   "gemini-3.7-flash-tiered": {
+    maxOutputTokens: 65536,
+    contextWindow: 1048576,
+    defaultThinkingBudget: 8192,
+    thinkingBudgetCap: 24576,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
+  // ── Gemini 3.8 Flash (current Antigravity/AGY live tiers) ─────────
+  "gemini-3.8-flash-high": {
+    maxOutputTokens: 65536,
+    contextWindow: 1048576,
+    defaultThinkingBudget: 24576,
+    thinkingBudgetCap: 24576,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
+  "gemini-3.8-flash-medium": {
+    maxOutputTokens: 65536,
+    contextWindow: 1048576,
+    defaultThinkingBudget: 8192,
+    thinkingBudgetCap: 24576,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
+  "gemini-3.8-flash-low": {
+    maxOutputTokens: 65536,
+    contextWindow: 1048576,
+    defaultThinkingBudget: 1024,
+    thinkingBudgetCap: 24576,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
+  "gemini-3.8-flash": {
+    maxOutputTokens: 65536,
+    contextWindow: 1048576,
+    defaultThinkingBudget: 8192,
+    thinkingBudgetCap: 24576,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+    aliases: ["gemini-3.8-flash-tiered"],
+  },
+  "gemini-3.8-flash-tiered": {
     maxOutputTokens: 65536,
     contextWindow: 1048576,
     defaultThinkingBudget: 8192,
@@ -317,6 +393,23 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     aliases: BEDROCK_CLAUDE_ALIASES("claude-sonnet-4-6", "claude-sonnet-4.6"),
   },
 
+  // ── Claude Sonnet 5.5 ───────────────────────────────────────────
+  // Listed before Sonnet 5: prefix lookup is first-match, and `claude-sonnet-5-5-*`
+  // must not resolve to the Sonnet 5 spec (which forwards `disabled` → upstream 400).
+  "claude-sonnet-5-5": {
+    maxOutputTokens: 128000,
+    contextWindow: 1000000,
+    defaultThinkingBudget: 32000,
+    thinkingBudgetCap: 120000,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+    adaptiveThinkingOnly: true,
+    rejectsForcedToolChoice: true,
+    disabledThinkingReplacement: "between_tools",
+    aliases: BEDROCK_CLAUDE_ALIASES("claude-sonnet-5-5", "claude-sonnet-5.5"),
+  },
+
   // ── Claude Sonnet 5 ─────────────────────────────────────────────
   "claude-sonnet-5": {
     // 1M context, 128K max output. Adaptive-thinking-only (manual
@@ -366,6 +459,21 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     aliases: BEDROCK_CLAUDE_ALIASES("claude-opus-4-7", "claude-opus-4.7"),
   },
 
+  // ── Claude Fable 5.1 ────────────────────────────────────────────
+  "claude-fable-5-1": {
+    maxOutputTokens: 128000,
+    contextWindow: 1000000,
+    defaultThinkingBudget: 32000,
+    thinkingBudgetCap: 120000,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+    rejectsThinkingDisabled: true,
+    adaptiveThinkingOnly: true,
+    rejectsForcedToolChoice: true,
+    aliases: BEDROCK_CLAUDE_ALIASES("claude-fable-5-1"),
+  },
+
   // ── Claude Fable 5 ──────────────────────────────────────────────
   "claude-fable-5": {
     maxOutputTokens: 128000,
@@ -380,6 +488,24 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     // …and, like Opus 4.7+, rejects manual budgets/`type:"enabled"` (adaptive-only).
     adaptiveThinkingOnly: true,
     aliases: BEDROCK_CLAUDE_ALIASES("claude-fable-5"),
+  },
+
+  // ── Claude Opus 5.5 ─────────────────────────────────────────────
+  // Listed before Opus 5 for the same first-match prefix reason. Unlike Opus 5 it
+  // rejects `disabled` at every effort and has no `between_tools`, so `disabled` is
+  // dropped (adaptive default).
+  "claude-opus-5-5": {
+    maxOutputTokens: 128000,
+    contextWindow: 1000000,
+    defaultThinkingBudget: 32000,
+    thinkingBudgetCap: 120000,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+    rejectsThinkingDisabled: true,
+    adaptiveThinkingOnly: true,
+    rejectsForcedToolChoice: true,
+    aliases: BEDROCK_CLAUDE_ALIASES("claude-opus-5-5", "claude-opus-5.5"),
   },
 
   // ── Claude Opus 5 ───────────────────────────────────────────────
@@ -456,6 +582,22 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     aliases: ["kimi-k2.6-thinking"],
   },
 
+  // ── Kimi K2.8 Preview (Kimi Coding — 1M context, native vision) ──
+  // #14003: Kimi Coding's stable wire ids `kimi-for-coding` and
+  // `kimi-for-coding-highspeed` both resolve to Kimi K2.8 Preview, which
+  // supports vision, tools, and thinking. The highspeed sibling must alias
+  // this spec too, otherwise it silently falls back to default caps (no
+  // vision) and the Vision-Bridge reroute bug reappears for that variant.
+  "kimi-k2.8-preview": {
+    maxOutputTokens: 131072,
+    contextWindow: 1048576,
+    thinkingBudgetCap: 32768,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+    aliases: ["kimi-for-coding", "kimi-for-coding-highspeed"],
+  },
+
   // ── Kimi K2.7 Code (Moonshot — 262K native, parity with K2.6) ───
   // #3761: importing this via Ollama Cloud's sparse /v1/models gave it no caps, so it
   // fell back to the 128K/8K defaults and lost vision/thinking. Pin the real values.
@@ -490,6 +632,17 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     supportsVision: true,
     aliases: ["qwen3.7-max", "qwen3-max-2026-01-23"],
   },
+  // #14181: the GA `qwen3.8-max` is a distinct model served by opencode-go (and
+  // listed bare by alibaba/qwen-cloud/kilocode/clinepass/xkiro) — it gets its own
+  // spec row instead of aliasing to the preview, which remains a separate model.
+  "qwen3.8-max": {
+    maxOutputTokens: 65536,
+    contextWindow: 1000000,
+    thinkingBudgetCap: 38912,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
   "qwen3.8-max-preview": {
     maxOutputTokens: 65536,
     contextWindow: 1000000,
@@ -497,7 +650,6 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     supportsThinking: true,
     supportsTools: true,
     supportsVision: true,
-    aliases: ["qwen3.8-max"],
   },
   "qwen3.6-plus": {
     maxOutputTokens: 65536,
@@ -517,10 +669,14 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   },
 
   // ── Xiaomi MiMo V2.5 (1M context, consensus across 7+ sync sources) ──
-  // Vision: ONLY mimo-v2.5 and mimo-v2-omni accept images per Xiaomi's docs
-  // (mimo.mi.com .../image-understanding). The *-pro chat models are TEXT-ONLY;
-  // models.dev mislabels them (hermes-agent#18884) — a hard override in
-  // src/lib/modelCapabilities.ts also beats that wrong synced attachment.
+  // Vision: in the v2.5 generation only `mimo-v2.5` and `mimo-v2-omni` accept
+  // images per Xiaomi's docs (mimo.mi.com .../image-understanding). The v2.5
+  // `*-pro` chat models are TEXT-ONLY; models.dev mislabels them
+  // (hermes-agent#18884) — a hard override in src/lib/modelCapabilities.ts
+  // also beats that wrong synced attachment. The v2.6 generation flips the
+  // `*-pro` rule (#14587): `mimo-v2.6-pro` accepts image input, covered by the
+  // `mimo-v2.6-pro` / `mimo-v2.6-flash` fragments in the shared vision
+  // heuristic rather than a spec.
   "mimo-v2.5-pro": {
     maxOutputTokens: 131072,
     contextWindow: 1048576,
@@ -553,6 +709,14 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
 
   // ── Z.AI GLM-5.3 (1M context mirrored from 5.2 — same base model; 128K max
   // output; effort via reasoning_effort param, tiers are OmniRoute aliases) ──
+  "glm-5.3-flash": {
+    maxOutputTokens: 131072,
+    contextWindow: 1000000,
+    thinkingBudgetCap: 38912,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
   "glm-5.3": {
     maxOutputTokens: 131072,
     contextWindow: 1000000,
@@ -580,6 +744,30 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
     thinkingBudgetCap: 38912,
     supportsThinking: true,
     supportsTools: true,
+  },
+  "glm-5.3-flash-high": {
+    maxOutputTokens: 131072,
+    contextWindow: 1000000,
+    thinkingBudgetCap: 38912,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
+  "glm-5.3-flash-low": {
+    maxOutputTokens: 131072,
+    contextWindow: 1000000,
+    thinkingBudgetCap: 38912,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
+  },
+  "glm-5.3-flash-max": {
+    maxOutputTokens: 131072,
+    contextWindow: 1000000,
+    thinkingBudgetCap: 38912,
+    supportsThinking: true,
+    supportsTools: true,
+    supportsVision: true,
   },
 
   // ── Z.AI GLM-5.2 (1M context, 128K max output, effort tiers) ────
@@ -624,12 +812,16 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   // ── MiniMax M3 (1M context, 512K max output) ─────────────────────
   // max output verified against MiniMax docs / OpenRouter / Artificial
   // Analysis (Nov 2025 launch): 1,048,576-token context, up to 512K output.
+  // Adaptive-thinking-only: MiniMax rejects manual budget_tokens /
+  // thinking.type:"enabled" with 400 (2013) — "invalid thinking.type:
+  // \"enabled\" (allowed: adaptive, disabled)" (#12132).
   "minimax-m3": {
     maxOutputTokens: 512000,
     contextWindow: 1048576,
     thinkingBudgetCap: 32768,
     supportsThinking: true,
     supportsTools: true,
+    adaptiveThinkingOnly: true,
     aliases: ["MiniMax-M3", "MiniMaxAI/MiniMax-M3"],
   },
 
@@ -762,6 +954,16 @@ export function getCanonicalModelSpecId(modelId: string): string | null {
     if (lower.startsWith(lowerKey)) return canonical;
   }
 
+  // Provider-routing-prefixed ids ("claude/claude-opus-4-8", "cc/...", "antigravity/...",
+  // "publishers/google/models/..."): the leading "<provider>/" segment defeats the
+  // startsWith rule above, so strip the FIRST segment and retry recursively. Reached
+  // only after all direct rules miss, so it can only ADD resolution, never override.
+  // No canonical MODEL_SPECS key contains "/".
+  const slash = modelId.indexOf("/");
+  if (slash > 0 && slash < modelId.length - 1) {
+    return getCanonicalModelSpecId(modelId.slice(slash + 1));
+  }
+
   return null;
 }
 
@@ -797,24 +999,74 @@ export function getAuthoritativeProviderContextWindow(
  * calls — valid for opus/sonnet, but claude-fable-5 defaults to adaptive thinking and rejects
  * `type:"disabled"` with an upstream 400. When the resolved target model is flagged
  * `rejectsThinkingDisabled`, drop the now-invalid `thinking` so the model uses its adaptive
- * default instead of hard-failing. Models that accept `disabled` are left untouched, and any
- * non-`disabled` thinking (enabled/adaptive) is always preserved. See issue #3554.
+ * default instead of hard-failing (#3554). When it declares `disabledThinkingReplacement`
+ * (Claude Sonnet 5.5), send that lowest setting instead, so thinking stays off. Models that
+ * accept `disabled` are left untouched, and any non-`disabled` thinking is always preserved.
  */
 export function normalizeThinkingForModel<T extends Record<string, unknown>>(
   body: T,
   modelId: string
 ): T {
   const thinking = body?.thinking as Record<string, unknown> | undefined;
-  if (
-    thinking &&
-    typeof thinking === "object" &&
-    thinking.type === "disabled" &&
-    getModelSpec(modelId)?.rejectsThinkingDisabled
-  ) {
-    const { thinking: _omitted, ...rest } = body as Record<string, unknown>;
-    return rest as T;
+  if (thinking && typeof thinking === "object" && thinking.type === "disabled") {
+    const spec = getModelSpec(modelId);
+    if (spec?.disabledThinkingReplacement === "between_tools") {
+      return normalizeForcedToolChoiceForModel(withBetweenToolsThinking(body), modelId);
+    }
+    if (spec?.rejectsThinkingDisabled) {
+      const { thinking: _omitted, ...rest } = body as Record<string, unknown>;
+      return normalizeForcedToolChoiceForModel(rest as T, modelId);
+    }
   }
-  return body;
+  return normalizeForcedToolChoiceForModel(body, modelId);
+}
+
+/**
+ * `between_tools` takes no other thinking field (display/budget_tokens/block_binding → 400)
+ * and is rejected at xhigh/max effort, so cap those to `high` — the client asked for
+ * thinking off, which only exists at high or below.
+ */
+function withBetweenToolsThinking<T extends Record<string, unknown>>(body: T): T {
+  const next: Record<string, unknown> = { ...body, thinking: { type: "between_tools" } };
+  const outputConfig = body.output_config;
+  if (outputConfig && typeof outputConfig === "object" && !Array.isArray(outputConfig)) {
+    const effort = (outputConfig as Record<string, unknown>).effort;
+    const normalizedEffort = typeof effort === "string" ? effort.toLowerCase() : "";
+    if (normalizedEffort === "xhigh" || normalizedEffort === "max") {
+      next.output_config = { ...outputConfig, effort: "high" };
+    }
+  }
+  return next as T;
+}
+
+/**
+ * Normalize tool-choice constraints that a resolved model cannot accept.
+ *
+ * Claude Fable 5.1 always uses adaptive thinking and rejects tool choices that force
+ * either any tool or one named tool. Preserve the declared tools and every unrelated
+ * request field, but drop the choice to select the default `auto` behavior so routing a
+ * request to Fable 5.1 does not turn a recoverable preference into an upstream 400.
+ */
+export function normalizeForcedToolChoiceForModel<T extends Record<string, unknown>>(
+  body: T,
+  modelId: string
+): T {
+  if (!getModelSpec(modelId)?.rejectsForcedToolChoice) return body;
+
+  const toolChoice = body.tool_choice;
+  const forced =
+    toolChoice === "required" ||
+    toolChoice === "any" ||
+    (toolChoice !== null &&
+      typeof toolChoice === "object" &&
+      !Array.isArray(toolChoice) &&
+      ["any", "tool", "function"].includes(
+        String((toolChoice as Record<string, unknown>).type || "").toLowerCase()
+      ));
+  if (!forced) return body;
+
+  const { tool_choice: _omitted, ...rest } = body;
+  return rest as T;
 }
 
 export function capMaxOutputTokens(modelId: string, requested?: number): number | undefined {

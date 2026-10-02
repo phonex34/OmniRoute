@@ -1,4 +1,5 @@
 import { getCodexRequestDefaults } from "@/lib/providers/requestDefaults";
+import { extractSessionAffinityKey } from "@/sse/services/auth";
 import {
   getCodexModelScope,
   getCodexRateLimitKey,
@@ -19,12 +20,15 @@ import {
 } from "../config/codexInstructions.ts";
 import { FETCH_BODY_TIMEOUT_MS, HTTP_STATUS, PROVIDERS } from "../config/constants.ts";
 import { readCodexPeekChunk, buildCodexTimeoutSafePassthroughBody } from "./codex/bodyTimeout.ts";
+import { stripCodexPassthroughRejectedParams } from "./codex/stripPassthroughRejectedParams.ts";
 import {
   CODEX_CLI_RS_ORIGINATOR,
   getCodexClientVersion,
+  getCodexClientVersionFromHeaders,
   getCodexUserAgent,
   normalizeCodexSessionId,
 } from "../config/codexClient.ts";
+import type { KeyHealth } from "../services/apiKeyRotator.ts";
 import {
   applyCodexClientIdentityHeaders,
   applyCodexClientMetadata,
@@ -33,15 +37,24 @@ import {
   withCodexFingerprintCredentials,
 } from "../config/codexIdentity.ts";
 import { getAccessToken } from "../services/tokenRefresh.ts";
-import { sanitizeResponsesInputItems } from "../services/responsesInputSanitizer.ts";
+import { sanitizeCodexResponsesInput } from "../services/responsesInputSanitizer.ts";
 import { applyReasoningInputPolicy } from "../services/reasoningInputPolicy.ts";
+import { getForcedReasoningEffort } from "../utils/reasoningRuleContext.ts";
 import { normalizeCodexVerbosity } from "../services/codexVerbosity.ts";
 import { getThinkingBudgetConfig, ThinkingMode } from "../services/thinkingBudget.ts";
+import {
+  codexOpaqueResponsesReplayStore,
+  type CodexOpaqueResponsesReplayItem,
+} from "../services/codexOpaqueResponsesReplayStore.ts";
 import { CORS_HEADERS } from "../utils/cors.ts";
+import { projectCodexPublicError } from "../utils/codexPublicError.ts";
 import { errorResponse } from "../utils/error.ts";
+import { buildSyntheticResponsesFailedEvent } from "../utils/responsesSequence.ts";
 import { normalizeCodexResponsesInput } from "../utils/responsesInputNormalization.ts";
+import { generateToolCallId } from "../translator/helpers/toolCallHelper.ts";
 import * as prl from "../utils/providerRequestLogging.ts";
 import { createRequire } from "module";
+import { loadDynamicModule } from "./codex/wreqLoader.ts";
 // Quota parsing/scheduling extracted to a pure leaf; re-exported for the
 // Codex account module and tests.
 export {
@@ -53,12 +66,18 @@ export {
 import { isCodexFreePlan, normalizeCodexTools } from "./codex/tools.ts";
 import {
   CODEX_EFFORT_ORDER as EFFORT_ORDER,
-  GPT_5_6_ULTRA_ALIAS_MODELS,
+  CODEX_ULTRA_ALIAS_MODELS,
+  getCodexAliasEffortCap,
   splitCodexReasoningSuffix,
   type CodexEffortLevel as EffortLevel,
 } from "./codex/reasoningSuffix.ts";
 import { repairMissingCodexToolCallOutputs } from "./codex/toolCallRepair.ts";
+import {
+  CODEX_REASONING_REPLAY_ERROR_CODE,
+  readCodexReasoningReplayRejection,
+} from "./codex/reasoningReplayRejection.ts";
 import { resolveAppServerConfig } from "./codex/appServerConfig.ts";
+import { getResponsesSubpath } from "./codex/responsesSubpath.ts";
 import { CodexAppServerExecutor } from "./codex-app-server.ts";
 // Re-exported for external importers (tests + provider services).
 export { isCodexFreePlan, normalizeCodexTools } from "./codex/tools.ts";
@@ -75,10 +94,28 @@ type WreqWebSocket = {
   close: (code?: number, reason?: string) => void;
   onmessage: ((event: { data: unknown }) => void) | null;
   onerror: ((event: { message?: string }) => void) | null;
-  onclose: (() => void) | null;
+  onclose: ((event?: { code?: number; reason?: string }) => void) | null;
 };
 type WebsocketFn = (url: string, opts?: Record<string, unknown>) => Promise<WreqWebSocket>;
 type ResponsesMessageInput = { role?: unknown; phase?: unknown; content?: unknown };
+type ResponsesInputItem = Record<string, unknown>;
+
+type CursorContentPart = {
+  type?: unknown;
+  id?: unknown;
+  name?: unknown;
+  input?: unknown;
+  tool_use_id?: unknown;
+  content?: unknown;
+  image_url?: unknown;
+  image?: unknown;
+  source?: unknown;
+  detail?: unknown;
+  text?: unknown;
+  url?: unknown;
+  data?: unknown;
+  media_type?: unknown;
+};
 
 let _websocketFn: WebsocketFn | null = null;
 let _wreqChecked = false;
@@ -89,7 +126,7 @@ function getCodexWebSocketTransport(): WebsocketFn | null {
   if (_wreqChecked) return _websocketFn;
   _wreqChecked = true;
   try {
-    const mod = _wreqRequire("wreq-js") as { websocket?: WebsocketFn };
+    const mod = loadDynamicModule(_wreqRequire, "wreq-js") as { websocket?: WebsocketFn };
     _websocketFn = typeof mod.websocket === "function" ? mod.websocket : null;
   } catch {
     console.warn("[codex] wreq-js import failed, websocket disabled");
@@ -166,13 +203,13 @@ function isCodexResponsesLiteRequest(
   );
 }
 
-// GPT-5.6 ultra-tier (sol/terra at "ultra") and luna at "max" coordinate delegation to
+// Astra/Sol/Terra at "ultra" and Luna at "max" coordinate delegation to
 // sub-agents via parallel tool calls (see the effort-clamp comment near clampEffort()).
 // Responses Lite must not strip parallel_tool_calls for those model/effort combos, or
 // delegation silently breaks while the request still returns HTTP 200 (issue #7821).
 function isCodexDelegationDependentModel(model: unknown): boolean {
   const { baseModel, effort } = splitCodexReasoningSuffix(model);
-  if (effort === "ultra" && GPT_5_6_ULTRA_ALIAS_MODELS.has(baseModel)) return true;
+  if (effort === "ultra" && CODEX_ULTRA_ALIAS_MODELS.has(baseModel)) return true;
   if (effort === "max" && baseModel === "gpt-5.6-luna") return true;
   return false;
 }
@@ -234,6 +271,258 @@ function convertSystemToDeveloperRole(body: Record<string, unknown>): void {
   }
 }
 
+/**
+ * Strip server-generated item IDs from the input array.
+ *
+ * The Codex /codex/responses endpoint does not persist response items even when
+ * store=true is sent. When proxy clients (e.g. OpenClaw) include response items
+ * from previous turns in the input array, those items carry server-assigned IDs
+ * (prefixed with "rs_", "fc_", "resp_", "msg_"). The Codex backend tries to
+ * validate these IDs against its persistence store and returns 404 when the items
+ * are not found (because store was effectively false).
+ *
+ * This function:
+ *   1. Removes bare string references ("rs_abc123") from the input array
+ *   2. Removes object items with type "item_reference" (explicit stored-item refs)
+ *   3. Strips the "id" field from any object in input whose id matches a
+ *      server-generated prefix (rs_, fc_, resp_, msg_) — so the content is
+ *      preserved but the backend won't try to look it up
+ */
+type CodexOpaqueReplayProvenance = {
+  readonly model: string;
+  readonly sessionId: string;
+  readonly expectedTurnMarker: string;
+};
+
+type CodexReplayRecoveryContext = {
+  replayEnabled: boolean;
+  provenance: CodexOpaqueReplayProvenance | null;
+};
+
+const codexReplayRecoveryContexts = new WeakMap<object, CodexReplayRecoveryContext>();
+
+function getCodexReplayRecoveryContext(body: unknown): CodexReplayRecoveryContext | null {
+  return body !== null && typeof body === "object" && !Array.isArray(body)
+    ? (codexReplayRecoveryContexts.get(body) ?? null)
+    : null;
+}
+
+function setCodexReplayRecoveryContext(body: unknown, context: CodexReplayRecoveryContext): void {
+  if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    codexReplayRecoveryContexts.set(body, context);
+  }
+}
+
+async function isCodexStalePrivateReplayError(response: Response): Promise<boolean> {
+  const text = await response.clone().text();
+  try {
+    const body: unknown = JSON.parse(text);
+    return hasCodexStalePrivateReplayMessage(body);
+  } catch (error) {
+    if (error instanceof SyntaxError) return false;
+    throw error;
+  }
+}
+
+function hasCodexStalePrivateReplayMessage(body: unknown): boolean {
+  if (typeof body === "string") {
+    return /invalid signature in thinking block|invalid_encrypted_content/i.test(body);
+  }
+  if (!body || typeof body !== "object") return false;
+  if (Array.isArray(body)) return body.some(hasCodexStalePrivateReplayMessage);
+  return Object.values(body).some(hasCodexStalePrivateReplayMessage);
+}
+
+function injectCodexOpaqueResponsesReplay(
+  body: Record<string, unknown>,
+  model: string,
+  sessionId: string | null
+): CodexOpaqueReplayProvenance | null {
+  if (!sessionId || !Array.isArray(body.input)) return null;
+
+  const replayChain = codexOpaqueResponsesReplayStore.getChain({ model, sessionId });
+  if (!replayChain) return null;
+
+  let provenance: CodexOpaqueReplayProvenance | null = null;
+  const currentOutputIds = collectCurrentCodexToolOutputIds(body.input);
+  const replayedCallIds = new Set<string>();
+  for (const turn of replayChain.turns) {
+    const fragment = toEligibleCodexReplayFragment(turn.items, {
+      currentInput: body.input,
+      currentOutputIds,
+      replayedCallIds,
+    });
+    if (!fragment) continue;
+
+    const outputIndex = findCurrentCodexToolOutputIndex(body.input, fragment.callId);
+    if (outputIndex === -1) continue;
+    body.input.splice(outputIndex, 0, ...fragment.items);
+    provenance = { model, sessionId, expectedTurnMarker: turn.turnMarker };
+  }
+  return provenance;
+}
+
+type CodexReplayFragment = {
+  readonly callId: string;
+  readonly items: readonly ResponsesInputItem[];
+};
+
+function collectCurrentCodexToolOutputIds(input: readonly unknown[]): ReadonlySet<string> {
+  const callIds = new Set<string>();
+  for (const item of input) {
+    const record = toResponsesInputItem(item);
+    if (!record) continue;
+    const callId = getCodexToolOutputCallId(record);
+    if (callId) callIds.add(callId);
+  }
+  return callIds;
+}
+
+type CodexReplayEligibility = {
+  readonly currentInput: readonly unknown[];
+  readonly currentOutputIds: ReadonlySet<string>;
+  readonly replayedCallIds: Set<string>;
+};
+
+function toEligibleCodexReplayFragment(
+  items: readonly CodexOpaqueResponsesReplayItem[],
+  eligibility: CodexReplayEligibility
+): CodexReplayFragment | null {
+  const { currentInput, currentOutputIds, replayedCallIds } = eligibility;
+  const call = items.find(isCodexReplayCall);
+  if (!call || !currentOutputIds.has(call.callId) || replayedCallIds.has(call.callId)) return null;
+
+  const replayItems = items
+    .filter((item) => item.type === "reasoning" || item === call)
+    .filter((item) => !hasEquivalentCodexReplayItem(currentInput, item))
+    .map(toCodexReplayInputItem);
+  replayedCallIds.add(call.callId);
+  return replayItems.length > 0 ? { callId: call.callId, items: replayItems } : null;
+}
+
+function hasEquivalentCodexReplayItem(
+  input: readonly unknown[],
+  item: CodexOpaqueResponsesReplayItem
+): boolean {
+  return input.some((value) => {
+    const record = toResponsesInputItem(value);
+    if (!record || record.type !== item.type) return false;
+    switch (item.type) {
+      case "reasoning":
+        return record.encrypted_content === item.encryptedContent;
+      case "function_call":
+        return record.call_id === item.callId;
+      case "custom_tool_call":
+        return record.call_id === item.callId;
+    }
+  });
+}
+
+function isCodexReplayCall(
+  item: CodexOpaqueResponsesReplayItem
+): item is Extract<CodexOpaqueResponsesReplayItem, { readonly callId: string }> {
+  return item.type === "function_call" || item.type === "custom_tool_call";
+}
+
+function toCodexReplayInputItem(item: CodexOpaqueResponsesReplayItem): ResponsesInputItem {
+  switch (item.type) {
+    case "reasoning":
+      return { type: item.type, encrypted_content: item.encryptedContent };
+    case "function_call":
+      return { type: item.type, call_id: item.callId, name: item.name, arguments: item.arguments };
+    case "custom_tool_call":
+      return { type: item.type, call_id: item.callId, name: item.name, input: item.input };
+  }
+}
+
+function findCurrentCodexToolOutputIndex(input: readonly unknown[], callId: string): number {
+  return input.findIndex((item) => {
+    const record = toResponsesInputItem(item);
+    return record ? getCodexToolOutputCallId(record) === callId : false;
+  });
+}
+
+function getCodexToolOutputCallId(item: ResponsesInputItem): string | null {
+  if (item.type !== "function_call_output" && item.type !== "custom_tool_call_output") return null;
+  return typeof item.call_id === "string" && item.call_id.trim() ? item.call_id : null;
+}
+
+function toResponsesInputItem(value: unknown): ResponsesInputItem | null {
+  return isResponsesInputItem(value) ? value : null;
+}
+
+function isResponsesInputItem(value: unknown): value is ResponsesInputItem {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function stripStoredItemReferences(body: Record<string, unknown>): void {
+  if (Array.isArray(body.input) && body.input.length === 0) {
+    body.input = [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "continue" }],
+      },
+    ];
+  }
+
+  if (!Array.isArray(body.input)) return;
+
+  const SERVER_ID_PATTERN = /^(rs|fc|resp|msg)_/;
+  let strippedCount = 0;
+
+  body.input = body.input.filter((item) => {
+    // Bare string references: "rs_abc123", "resp_abc123"
+    if (typeof item === "string" && SERVER_ID_PATTERN.test(item)) {
+      strippedCount++;
+      return false;
+    }
+
+    // Object references: { type: "item_reference", id: "rs_..." }
+    if (
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      (item as Record<string, unknown>).type === "item_reference"
+    ) {
+      strippedCount++;
+      return false;
+    }
+
+    // Reasoning blobs (encrypted_content) are unusable with store=false since
+    // previous_response_id is deleted — strip them to avoid wasting context
+    // tokens (O(n^2) growth across agentic turns).
+    if (
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      (item as Record<string, unknown>).type === "reasoning"
+    ) {
+      strippedCount++;
+      return false;
+    }
+
+    // Object items with server-generated IDs: strip the id field but keep the item.
+    // e.g. { id: "rs_...", type: "reasoning", summary: [...] } → keep content, remove id
+    // e.g. { id: "fc_...", type: "function_call", ... } → keep content, remove id
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      const record = item as Record<string, unknown>;
+      if (typeof record.id === "string" && SERVER_ID_PATTERN.test(record.id)) {
+        delete record.id;
+        strippedCount++;
+      }
+    }
+
+    return true;
+  });
+
+  if (strippedCount > 0) {
+    console.debug(
+      `[Codex] stripStoredItemReferences: sanitized ${strippedCount} server-generated ID(s) from input`
+    );
+  }
+}
+
 function stripOrphanedCodexFunctionCallOutputs(body: Record<string, unknown>): void {
   if (!Array.isArray(body.input)) return;
   const input = body.input;
@@ -287,28 +576,147 @@ function stripOrphanedCodexFunctionCallOutputs(body: Record<string, unknown>): v
   }
 }
 
-function getResponsesSubpath(endpointPath: unknown): string | null {
-  let normalizedEndpoint = String(endpointPath || "");
-  while (normalizedEndpoint.endsWith("/") && normalizedEndpoint.length > 0) {
-    normalizedEndpoint = normalizedEndpoint.slice(0, -1);
+function toCursorContentPart(value: unknown): CursorContentPart | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as CursorContentPart)
+    : null;
+}
+
+function toResponsesImageInput(part: CursorContentPart): ResponsesInputItem | null {
+  if (part.type === "image_url") {
+    const imageUrl =
+      typeof part.image_url === "string"
+        ? part.image_url
+        : toCursorContentPart(part.image_url)?.url;
+    if (typeof imageUrl !== "string" || !imageUrl) return null;
+    const image: ResponsesInputItem = { type: "input_image", image_url: imageUrl };
+    if (part.detail !== undefined) image.detail = part.detail;
+    return image;
   }
 
-  const lower = normalizedEndpoint.toLowerCase();
-  if (lower === "responses" || lower.endsWith("/responses")) {
-    return "";
-  }
+  if (part.type === "image") {
+    if (typeof part.image === "string" && part.image) {
+      return {
+        type: "input_image",
+        image_url: part.image,
+        ...(part.detail !== undefined ? { detail: part.detail } : {}),
+      };
+    }
 
-  const responsesSlash = "/responses/";
-  const idx = lower.lastIndexOf(responsesSlash);
-  if (idx !== -1) {
-    return normalizedEndpoint.slice(idx + "/responses".length);
-  }
-
-  if (lower.startsWith("responses/")) {
-    return normalizedEndpoint.slice("responses".length);
+    const source = toCursorContentPart(part.source);
+    if (source?.type === "base64" && typeof source.data === "string" && source.data) {
+      const mediaType = typeof source.media_type === "string" ? source.media_type : "image/png";
+      return {
+        type: "input_image",
+        image_url: `data:${mediaType};base64,${source.data}`,
+        ...(part.detail !== undefined ? { detail: part.detail } : {}),
+      };
+    }
+    if (source?.type === "url" && typeof source.url === "string" && source.url) {
+      return {
+        type: "input_image",
+        image_url: source.url,
+        ...(part.detail !== undefined ? { detail: part.detail } : {}),
+      };
+    }
   }
 
   return null;
+}
+
+function toToolOutputContent(content: unknown): unknown {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return content == null ? "" : JSON.stringify(content);
+
+  const output: ResponsesInputItem[] = [];
+  for (const contentValue of content) {
+    const part = toCursorContentPart(contentValue);
+    if (!part) {
+      if (typeof contentValue === "string") output.push({ type: "input_text", text: contentValue });
+      continue;
+    }
+    if (part.type === "text") {
+      output.push({ type: "input_text", text: typeof part.text === "string" ? part.text : "" });
+      continue;
+    }
+    const image = toResponsesImageInput(part);
+    if (image) output.push(image);
+  }
+
+  return output.length > 0 ? output : "";
+}
+
+function convertCursorMessagesToResponsesInput(
+  messages: readonly ResponsesMessageInput[]
+): unknown[] {
+  const input: unknown[] = [];
+
+  for (const message of messages) {
+    const role = typeof message.role === "string" ? message.role : "user";
+    const content = typeof message.content === "string" ? [message.content] : message.content;
+    const messageContent: ResponsesInputItem[] = [];
+    const extractedItems: ResponsesInputItem[] = [];
+
+    if (Array.isArray(content)) {
+      for (const contentValue of content) {
+        if (typeof contentValue === "string") {
+          messageContent.push({
+            type: role === "assistant" ? "output_text" : "input_text",
+            text: contentValue,
+          });
+          continue;
+        }
+
+        const part = toCursorContentPart(contentValue);
+        if (!part) continue;
+        if (part.type === "text") {
+          messageContent.push({
+            type: role === "assistant" ? "output_text" : "input_text",
+            text: typeof part.text === "string" ? part.text : "",
+          });
+          continue;
+        }
+        if (part.type === "tool_use") {
+          const name = typeof part.name === "string" ? part.name.trim() : "";
+          if (!name) continue;
+          const callId =
+            typeof part.id === "string" && part.id.trim() ? part.id : generateToolCallId();
+          extractedItems.push({
+            type: "function_call",
+            call_id: callId,
+            name,
+            arguments:
+              typeof part.input === "string" ? part.input : JSON.stringify(part.input ?? {}),
+          });
+          continue;
+        }
+        if (part.type === "tool_result") {
+          const callId = typeof part.tool_use_id === "string" ? part.tool_use_id.trim() : "";
+          if (!callId) continue;
+          extractedItems.push({
+            type: "function_call_output",
+            call_id: callId,
+            output: toToolOutputContent(part.content),
+          });
+          continue;
+        }
+        const image = toResponsesImageInput(part);
+        if (image && role !== "assistant") messageContent.push(image);
+      }
+    }
+
+    if (messageContent.length > 0) {
+      input.push({
+        type: "message",
+        role,
+        ...(typeof message.phase === "string" ? { phase: message.phase } : {}),
+        content: messageContent,
+      });
+    }
+    input.push(...extractedItems);
+  }
+
+  return input;
 }
 
 export function isCompactResponsesEndpoint(endpointPath: unknown): boolean {
@@ -324,14 +732,10 @@ function normalizeServiceTierValue(value: unknown): string | undefined {
 }
 
 /**
- * Maximum reasoning effort allowed per Codex model.
- * Models not listed here retain the legacy xhigh cap.
- * Update this table when Codex releases new models with different caps.
+ * Maximum reasoning effort per Codex model. Max/ultra-tier models come from the alias
+ * sets in reasoningSuffix.ts; everything else unlisted keeps the xhigh cap.
  */
 const MAX_EFFORT_BY_MODEL: Record<string, EffortLevel> = {
-  "gpt-5.6-sol": "ultra",
-  "gpt-5.6-terra": "ultra",
-  "gpt-5.6-luna": "max",
   "gpt-5.3-codex": "xhigh",
   "gpt-5.1-codex-max": "xhigh",
   "gpt-5-mini": "high",
@@ -344,7 +748,7 @@ const MAX_EFFORT_BY_MODEL: Record<string, EffortLevel> = {
  * Returns the original value if within limits, or the cap if it exceeds it.
  */
 function clampEffort(model: string, requested: string): string {
-  const max: EffortLevel = MAX_EFFORT_BY_MODEL[model] ?? "xhigh";
+  const max: EffortLevel = MAX_EFFORT_BY_MODEL[model] ?? getCodexAliasEffortCap(model) ?? "xhigh";
   const reqIdx = EFFORT_ORDER.indexOf(requested as EffortLevel);
   const maxIdx = EFFORT_ORDER.indexOf(max);
   if (reqIdx > maxIdx) {
@@ -493,7 +897,6 @@ function toCodexResponseFailedEvent(parsed: Record<string, unknown>): Record<str
     typeof upstreamError.message === "string" && upstreamError.message.trim()
       ? upstreamError.message
       : "Codex upstream error";
-  const error: Record<string, unknown> = { code, message };
   const explicitStatus =
     toStatusCode(parsed.status_code) ??
     toStatusCode(parsed.status) ??
@@ -503,18 +906,17 @@ function toCodexResponseFailedEvent(parsed: Record<string, unknown>): Record<str
     toStatusCode(upstreamError.status);
   const statusCode =
     explicitStatus ?? (looksLikeQuotaOrRateLimit(code, type, message) ? 429 : null);
+  const error: Record<string, unknown> = {
+    ...projectCodexPublicError({ status: statusCode, code, type }),
+  };
 
-  if (type) error.type = type;
   if (statusCode !== null) error.status_code = statusCode;
 
-  return {
-    type: "response.failed",
-    response: {
-      id: typeof response?.id === "string" ? response.id : null,
-      status: "failed",
-      error,
-    },
-  };
+  return buildSyntheticResponsesFailedEvent({
+    id: typeof response?.id === "string" ? response.id : null,
+    status: "failed",
+    error,
+  });
 }
 
 // Drop non-standard `codex.*` SSE events (notably `codex.rate_limits`) from
@@ -538,6 +940,10 @@ export function codexDropNonstandardEvents(): boolean {
 // every `codex.*` event block from the byte stream before it reaches the client.
 // Exported for unit testing (#4715). Strips `codex.*` SSE event blocks from a
 // streaming Response when `codexDropNonstandardEvents()` is on (default, #11014).
+// Pre-compiled: the filter's transform() runs on every chunk, so these were
+// re-allocated per block/iteration before hoisting.
+const CODEX_SSE_EVENT_LINE_RE = /^event:\s*(.+)$/m;
+const CODEX_SSE_BLOCK_SEP_RE = /\r?\n\r?\n/;
 export function filterNonstandardCodexSse(response: Response): Response {
   const contentType = response.headers.get("content-type") || "";
   if (!response.body || !contentType.includes("text/event-stream")) {
@@ -547,14 +953,14 @@ export function filterNonstandardCodexSse(response: Response): Response {
   const encoder = new TextEncoder();
   let buffer = "";
   const dropBlock = (block: string): boolean => {
-    const match = /^event:\s*(.+)$/m.exec(block);
+    const match = CODEX_SSE_EVENT_LINE_RE.exec(block);
     return !!match && match[1].trim().startsWith("codex.");
   };
   const transform = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
       while (true) {
-        const separator = /\r?\n\r?\n/.exec(buffer);
+        const separator = CODEX_SSE_BLOCK_SEP_RE.exec(buffer);
         if (!separator) break;
         const blockEnd = separator.index + separator[0].length;
         const block = buffer.slice(0, blockEnd);
@@ -815,6 +1221,22 @@ export class CodexExecutor extends BaseExecutor {
       requestInput.body
     );
     const nextInput = { ...requestInput, credentials };
+    const forcedEffort = getForcedReasoningEffort(credentials);
+    if (forcedEffort) {
+      const nextBody =
+        nextInput.body && typeof nextInput.body === "object"
+          ? (nextInput.body as Record<string, unknown>)
+          : {};
+      nextInput.body = {
+        ...nextBody,
+        reasoning: {
+          ...(nextBody.reasoning && typeof nextBody.reasoning === "object"
+            ? nextBody.reasoning
+            : {}),
+          effort: forcedEffort,
+        },
+      };
+    }
 
     if (isCodexAppServerRequired(nextInput.credentials)) {
       if (!this.appServer) {
@@ -826,7 +1248,26 @@ export class CodexExecutor extends BaseExecutor {
     }
 
     if (!isCodexResponsesWebSocketRequired(nextInput.model, nextInput.credentials)) {
+      const recoveryContext = getCodexReplayRecoveryContext(nextInput.body) ?? {
+        replayEnabled: true,
+        provenance: null,
+      };
+      setCodexReplayRecoveryContext(nextInput.body, recoveryContext);
       const httpResult = await super.execute(nextInput);
+      const response = (httpResult as { response?: Response }).response;
+      const completedRecoveryContext = getCodexReplayRecoveryContext(nextInput.body);
+      if (
+        completedRecoveryContext?.provenance &&
+        response?.status === 400 &&
+        (await isCodexStalePrivateReplayError(response))
+      ) {
+        codexOpaqueResponsesReplayStore.clearChainIfCurrent(completedRecoveryContext.provenance);
+        setCodexReplayRecoveryContext(nextInput.body, {
+          replayEnabled: false,
+          provenance: null,
+        });
+        return super.execute(nextInput);
+      }
       if (codexDropNonstandardEvents()) {
         const resp = (httpResult as { response?: Response }).response;
         if (resp?.body) {
@@ -834,6 +1275,19 @@ export class CodexExecutor extends BaseExecutor {
         }
       }
       const resp = (httpResult as { response?: Response }).response;
+      if (resp && !resp.ok) {
+        const replayRejection = await readCodexReasoningReplayRejection(resp);
+        if (replayRejection) {
+          input.log?.warn?.("CODEX", "upstream rejected a replayed reasoning item");
+          await resp.body?.cancel().catch(() => undefined);
+          (httpResult as { response: Response }).response = errorResponse(
+            HTTP_STATUS.BAD_REQUEST,
+            replayRejection.message,
+            { type: "invalid_request_error", code: CODEX_REASONING_REPLAY_ERROR_CODE }
+          );
+          return httpResult;
+        }
+      }
       if (resp) {
         const peek = await peekCodexSseTransientError(resp);
         if (peek.matched) {
@@ -953,18 +1407,19 @@ export class CodexExecutor extends BaseExecutor {
 
     const failController = (code: string, message: string) => {
       if (closed) return;
+      nextInput.log?.warn?.("CODEX", `WebSocket stream failed (${code}): ${message}`);
       const controller = streamController;
-      const payload = JSON.stringify({
-        type: "response.failed",
-        response: {
+      const payload = JSON.stringify(
+        buildSyntheticResponsesFailedEvent({
           id: null,
           status: "failed",
-          error: { code, message },
-        },
-      });
+          error: projectCodexPublicError({ status: 502, code, type: "provider_error" }),
+        })
+      );
       try {
         controller?.enqueue(encoder.encode(`event: response.failed\ndata: ${payload}\n\n`));
       } catch {
+        console.warn("[codex] failController: failed to enqueue response.failed");
         // Downstream closed before the failure could be delivered.
       }
       finishStream({ reason: "upstream_failed" });
@@ -1021,8 +1476,19 @@ export class CodexExecutor extends BaseExecutor {
               event.message || "Codex upstream WebSocket error"
             );
           };
-          ws.onclose = () => {
-            finishStream({ reason: "upstream_closed", closeSocket: false });
+          ws.onclose = (event) => {
+            // A close after a terminal event already finished the stream — no-op.
+            // A close before any terminal event means the upstream died mid-response:
+            // emit a terminal response.failed instead of ending the client stream as
+            // if it completed normally (silent truncation).
+            if (closed) return;
+            const closeDetail = event
+              ? ` (code ${event.code ?? "unknown"}${event.reason ? `: ${event.reason}` : ""})`
+              : "";
+            failController(
+              "upstream_websocket_closed",
+              `Codex upstream WebSocket closed before a terminal response event${closeDetail}`
+            );
           };
           if (!closed) {
             await prl.captureCurrentProviderBody(url, headers, bodyString, nextInput.log);
@@ -1082,11 +1548,30 @@ export class CodexExecutor extends BaseExecutor {
    * Always request event-stream from upstream, even when client requested stream=false.
    * Includes chatgpt-account-id header for strict workspace binding.
    */
-  buildHeaders(credentials: ProviderCredentials, stream = true) {
+  buildHeaders(
+    credentials: ProviderCredentials,
+    stream = true,
+    clientHeaders?: Record<string, string> | null,
+    model?: string,
+    health?: Record<string, KeyHealth>
+  ) {
     const isCompactRequest = isCompactResponsesEndpoint(credentials?.requestEndpointPath);
-    const headers = super.buildHeaders(credentials, isCompactRequest ? false : true);
-    headers.Version = getCodexClientVersion();
-    setUserAgentHeader(headers, getCodexUserAgent());
+    const headers = super.buildHeaders(
+      credentials,
+      isCompactRequest ? false : true,
+      clientHeaders,
+      model,
+      health
+    );
+
+    // Forward the CALLER's own Codex client version upstream instead of a pinned
+    // default. The ChatGPT backend gates newer models on the reported client
+    // version (e.g. "The 'gpt-6-astra' model requires a newer version of Codex"),
+    // so a hardcoded value silently rots whenever the user upgrades their CLI.
+    // Falls back to the configured/default version when the caller sends none.
+    const clientVersion = getCodexClientVersionFromHeaders(clientHeaders);
+    headers.Version = clientVersion ?? getCodexClientVersion();
+    setUserAgentHeader(headers, getCodexUserAgent(clientVersion));
 
     // Add workspace binding header if workspaceId is persisted
     const workspaceId = credentials?.providerSpecificData?.workspaceId;
@@ -1201,6 +1686,7 @@ export class CodexExecutor extends BaseExecutor {
         : {};
 
     const nativeCodexPassthrough = body?._nativeCodexPassthrough === true;
+    const replaySessionId = nativeCodexPassthrough ? null : extractSessionAffinityKey(body);
     const isCompactRequest = isCompactResponsesEndpoint(credentials?.requestEndpointPath);
     const requestDefaults = getCodexRequestDefaults(credentials?.providerSpecificData);
     const thinkingBudgetConfig = getThinkingBudgetConfig();
@@ -1228,30 +1714,7 @@ export class CodexExecutor extends BaseExecutor {
     // Issue #1832 & #1853: Map messages to input for clients like Cursor 5.5 that use responses/compact but send messages instead of input.
     // This MUST run before convertSystemToDeveloperRole.
     if (!body.input && Array.isArray(body.messages)) {
-      body.input = body.messages.map((msg: ResponsesMessageInput) => ({
-        type: "message",
-        role: typeof msg.role === "string" ? msg.role : "user",
-        ...(typeof msg.phase === "string" ? { phase: msg.phase } : {}),
-        content:
-          typeof msg.content === "string"
-            ? [{ type: "input_text", text: msg.content }]
-            : Array.isArray(msg.content)
-              ? msg.content.map((contentPart: unknown) => {
-                  if (
-                    contentPart &&
-                    typeof contentPart === "object" &&
-                    !Array.isArray(contentPart) &&
-                    (contentPart as Record<string, unknown>).type === "text"
-                  ) {
-                    return {
-                      type: "input_text",
-                      text: (contentPart as Record<string, unknown>).text,
-                    };
-                  }
-                  return contentPart;
-                })
-              : [],
-      }));
+      body.input = convertCursorMessagesToResponsesInput(body.messages);
     } else if (!body.input && typeof body.prompt === "string" && body.prompt.trim()) {
       // Issue #1872: Cursor occasionally passes the request as `prompt` instead of `messages`.
       body.input = [
@@ -1271,13 +1734,18 @@ export class CodexExecutor extends BaseExecutor {
 
     normalizeCodexResponsesInput(body);
 
-    if (Array.isArray(body.input)) {
-      body.input = sanitizeResponsesInputItems(body.input, false, {
-        dropInternalAssistantMessages: !nativeCodexPassthrough,
-      });
-    }
+    sanitizeCodexResponsesInput(body, nativeCodexPassthrough);
     stripOrphanedCodexFunctionCallOutputs(body);
     repairMissingCodexToolCallOutputs(body);
+
+    let modelEffort: string | null = null;
+    let cleanModel = typeof body.model === "string" ? body.model : model;
+    const splitModel = splitCodexReasoningSuffix(cleanModel);
+    if (splitModel.effort) {
+      modelEffort = splitModel.effort;
+      body.model = splitModel.baseModel;
+      cleanModel = splitModel.baseModel;
+    }
 
     // ── Cache-aware system prompt handling (both paths) ──
     //
@@ -1350,19 +1818,33 @@ export class CodexExecutor extends BaseExecutor {
       defaultFunctionStrict: nativeCodexPassthrough ? undefined : false,
     });
 
+    // Strip stored response item references (rs_, resp_, msg_ IDs) and unusable
+    // reasoning blobs from translated input. The /codex/responses endpoint does not
+    // persist responses even with store=true, so any references to previous response
+    // items would cause 404 errors. Skipped for native passthrough, which forwards
+    // the caller's Responses input (including opaque reasoning) untouched.
+    if (!nativeCodexPassthrough) {
+      stripStoredItemReferences(body);
+    }
+    const replayRecoveryContext = getCodexReplayRecoveryContext(bodyInput);
+    if (
+      replayRecoveryContext?.replayEnabled !== false &&
+      !nativeCodexPassthrough &&
+      replaySessionId &&
+      !replaySessionId.startsWith("input:sha256:")
+    ) {
+      const provenance = injectCodexOpaqueResponsesReplay(body, cleanModel, replaySessionId);
+      if (provenance) {
+        setCodexReplayRecoveryContext(bodyInput, { replayEnabled: true, provenance });
+      }
+    }
+    stripOrphanedCodexFunctionCallOutputs(body);
+    repairMissingCodexToolCallOutputs(body);
+
     // Issue #806: Even for native passthrough, some clients (purist completions) might indiscriminately inject
     // a `messages` or `prompt` array which the strict Codex Responses schema rejects.
     delete body.messages;
     delete body.prompt;
-
-    let modelEffort: string | null = null;
-    let cleanModel = typeof body.model === "string" ? body.model : model;
-    const splitModel = splitCodexReasoningSuffix(cleanModel);
-    if (splitModel.effort) {
-      modelEffort = splitModel.effort;
-      body.model = splitModel.baseModel;
-      cleanModel = splitModel.baseModel;
-    }
 
     const reasoningRecord =
       body.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning)
@@ -1376,8 +1858,18 @@ export class CodexExecutor extends BaseExecutor {
     // Issue #2331: model suffix aliases (for example gpt-5.5-xhigh) represent an
     // explicit model selection, so they must override client-injected defaults such
     // as OpenCode's automatic reasoning.effort=medium for GPT-5-family requests.
+    // A server-selected force rule is stronger than either source.
+    // OpenRouter-style `enabled: false` asks for reasoning to be off. It
+    // wins over the connection default but still loses to any per-request
+    // effort selection (model suffix, reasoning.effort, or flat
+    // reasoning_effort).
+    const clientDisabledReasoning = reasoningRecord?.enabled === false;
     const rawEffort =
-      modelEffort || explicitReasoning || requestReasoningEffort || fallbackReasoningEffort;
+      getForcedReasoningEffort(credentials) ||
+      modelEffort ||
+      explicitReasoning ||
+      requestReasoningEffort ||
+      (clientDisabledReasoning ? "none" : fallbackReasoningEffort);
 
     if (rawEffort) {
       const clampedEffort = clampEffort(cleanModel, rawEffort);
@@ -1386,6 +1878,24 @@ export class CodexExecutor extends BaseExecutor {
         // Ultra coordinates delegation in Codex clients; the upstream wire effort is Max.
         effort: clampedEffort === "ultra" ? "max" : clampedEffort,
       };
+    }
+
+    // The Codex Responses API accepts only `effort` and `summary` inside
+    // `reasoning`. Client ecosystems send OpenRouter-style keys (`enabled`,
+    // `max_tokens`, `exclude`, ...) that the upstream rejects with HTTP 400
+    // "Unknown parameter: 'reasoning.<key>'", so whitelist the object before
+    // it reaches the wire. This must run even when no effort was resolved,
+    // because the client's original object is forwarded unchanged in that
+    // case.
+    const wireReasoning =
+      body.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning)
+        ? (body.reasoning as Record<string, unknown>)
+        : null;
+    if (wireReasoning) {
+      for (const key of Object.keys(wireReasoning)) {
+        if (key !== "effort" && key !== "summary") delete wireReasoning[key];
+      }
+      if (Object.keys(wireReasoning).length === 0) delete body.reasoning;
     }
     ensureCodexReasoningSummary(body);
     if (isCompactRequest) {
@@ -1405,16 +1915,7 @@ export class CodexExecutor extends BaseExecutor {
     delete body.truncation;
     delete body.background; // Droid CLI sends this but Codex Responses API rejects it
 
-    // Issue #3317: strip client-only fields the Codex Responses API rejects with
-    // 400 "Unsupported parameter" — for BOTH the native passthrough (early return
-    // below) and the translated path. The chat-completions path already removes
-    // these (base.ts prompt_cache_retention #1884; openai-responses translator
-    // safety_identifier #2770), but the responses->responses passthrough skips
-    // translation. `user` is always rejected by Codex /responses, so it is removed
-    // unconditionally here (unlike base.ts, which only drops it when empty).
-    delete body.prompt_cache_retention;
-    delete body.safety_identifier;
-    delete body.user;
+    stripCodexPassthroughRejectedParams(cleanModel || model, body);
 
     // Inject prompt_cache_key for Codex prompt caching.
     // The official Codex client sets this to conversation_id (a stable UUID per session).
@@ -1478,6 +1979,11 @@ export class CodexExecutor extends BaseExecutor {
       "client_metadata",
       // GPT-5 output verbosity ({ verbosity } — normalized above by normalizeCodexVerbosity).
       "text",
+      // Responses Lite (#7171/#7821/#11707): enforceCodexResponsesLiteParallelToolCalls()
+      // forces this field on the translated (non-_nativeCodexPassthrough) path too — it
+      // must survive this allowlist filter or upstream rejects with "X-OpenAI-Internal-
+      // Codex-Responses-Lite requires `parallel_tool_calls` to be false."
+      "parallel_tool_calls",
       // Internal markers used by OmniRoute pipeline
       "_omnirouteResponsesStore",
     ]);

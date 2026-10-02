@@ -22,16 +22,43 @@ import {
   isReservedProviderPrefix,
   reservedProviderPrefixMessage,
 } from "@/shared/constants/reservedProviderPrefixes";
-
+import {
+  isValidIanaTimeZone,
+  isValidResetHour,
+} from "@omniroute/open-sse/services/dailyQuotaReset.ts";
 import {
   upstreamHeadersRecordSchema,
   modelCompatPerProtocolSchema,
   customHeadersSchema,
 } from "./misc.ts";
+import { isValidProviderIconUrl } from "@/shared/validation/iconUrl";
 
 export { validateProviderSpecificData };
 
-import { isValidProviderIconUrl } from "@/shared/validation/iconUrl";
+// Nullable as well as optional, to match dailyQuotaResetHourSchema below. The
+// dashboard sends both fields as null when they are left blank, and the two
+// schemas disagreeing about that meant an edit touching neither of them still
+// failed validation on this one (#13066). The storage layer already coerces to
+// null (`data.dailyQuotaResetTimezone || null` in db/providers/nodes.ts), so
+// accepting null here changes nothing downstream.
+const dailyQuotaResetTimezoneSchema = z
+  .string()
+  .trim()
+  .optional()
+  .nullable()
+  .or(z.literal(""))
+  .refine((value) => !value || isValidIanaTimeZone(value), {
+    message: "Unknown IANA timezone",
+  });
+
+const dailyQuotaResetHourSchema = z
+  .number()
+  .int()
+  .optional()
+  .nullable()
+  .refine((value) => value == null || isValidResetHour(value), {
+    message: "Hour must be 0-23",
+  });
 
 // ──── Provider Schemas ────
 
@@ -48,7 +75,7 @@ const providerNodeIconUrlSchema = z
   .optional();
 
 // #6715: the `apiKey` field is reused as the raw `Cookie:` header value for
-// cookie-based web providers (Gemini Business, Copilot M365, ChatGPT Web,
+// cookie-based web providers (Gemini Business, Copilot M365, ChatGPT Web (Codex),
 // Claude Web, …). Real multi-cookie session headers (many `__Secure-*` entries,
 // large session tokens) legitimately exceed the old 10,000-char cap, so saving
 // a cookie that the provider's own `validate` check (validateProviderApiKeySchema,
@@ -271,6 +298,10 @@ export const providerModelMutationSchema = z.object({
   // the same flag flows through `getCustomVisionCapabilityFields()` in the /v1/models
   // catalog. `null` clears a manual override back to the id-based heuristic.
   supportsVision: z.boolean().nullable().optional(),
+  dimensions: z.number().int().positive().nullable().optional(),
+  supportedInputTypes: z.array(z.string()).optional(),
+  modelType: z.enum(["chat", "embedding", "image", "rerank"]).optional(),
+  isFree: z.boolean().nullable().optional(),
   normalizeToolCallId: z.boolean().optional(),
   preserveOpenAIDeveloperRole: z.boolean().nullable().optional(),
   upstreamHeaders: upstreamHeadersRecordSchema.nullable().optional(),
@@ -280,13 +311,19 @@ export const providerModelMutationSchema = z.object({
     .optional(),
   // #9820: optional async video-generation job preset for a custom
   // OpenAI-compatible provider whose /videos surface is a submit→poll API
-  // (agnes-video-job, muapi-video-job, sora-job). Persisted on the custom model
+  // (agnes-video-job, agnes-video-2.5-job, muapi-video-job, sora-job). Persisted on the custom model
   // row; the /v1/videos/generations handler branches on it between the
   // synchronous OpenAI-compatible path and the job/poll path. `"openai-video"`
   // is a legacy no-op value that keeps the sync handler selected.
   generationConfig: z
     .object({
-      preset: z.enum(["agnes-video-job", "muapi-video-job", "sora-job", "openai-video"]),
+      preset: z.enum([
+        "agnes-video-job",
+        "agnes-video-2.5-job",
+        "muapi-video-job",
+        "sora-job",
+        "openai-video",
+      ]),
     })
     .optional(),
 });
@@ -306,11 +343,13 @@ export const removeModelAliasSchema = z.object({
 
 export const createProviderNodeSchema = z
   .object({
-    // #6874: name/prefix are required in general, but a `preset` (e.g.
-    // "vibeproxy-openai") supplies both — enforced conditionally below
+    // #6874: name is required in general, but a `preset` (e.g.
+    // "vibeproxy-openai") supplies it — enforced conditionally below
     // instead of unconditionally here.
     name: z.string().trim().optional().or(z.literal("")),
-    prefix: z.string().trim().optional().or(z.literal("")),
+    // Prefix is optional: when omitted the node is stored with a NULL prefix
+    // and model names are not prefixed.
+    prefix: z.string().trim().min(1).optional().or(z.literal("")),
     apiType: z
       .enum([
         "chat",
@@ -336,9 +375,22 @@ export const createProviderNodeSchema = z
     // isValidProviderIconUrl (2000 chars for http(s), 256 KiB for data:image).
     iconUrl: providerNodeIconUrlSchema,
     customHeaders: customHeadersSchema,
+    dailyQuotaResetTimezone: dailyQuotaResetTimezoneSchema,
+    dailyQuotaResetHour: dailyQuotaResetHourSchema,
   })
   .superRefine((value, ctx) => {
     const nodeType = value.type || "openai-compatible";
+    const normalizedPrefix = value.prefix?.trim();
+    if (normalizedPrefix && isReservedProviderPrefix(normalizedPrefix)) {
+      // Validate caller-supplied prefixes before preset handling. Presets may
+      // provide a default, but the route preserves an explicit prefix; an early
+      // return here used to let retired identities create unreachable nodes.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: reservedProviderPrefixMessage(normalizedPrefix),
+        path: ["prefix"],
+      });
+    }
     if (value.preset === "vibeproxy-openai") {
       // Preset supplies name/prefix/apiType — but baseUrl is still mandatory
       // (a local proxy's host/port is operator-specific, unlike the generic
@@ -359,18 +411,13 @@ export const createProviderNodeSchema = z
         path: ["name"],
       });
     }
-    if (!value.prefix || !value.prefix.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Prefix is required",
-        path: ["prefix"],
-      });
-    } else if (isReservedProviderPrefix(value.prefix.trim())) {
+    if (value.prefix && value.prefix.trim() && isReservedProviderPrefix(value.prefix.trim())) {
       // Reserved-prefix guard (tokenrouter bug): the runtime model resolver skips
       // compatible-node lookup for built-in registry ids/aliases, so a node
       // created with such a prefix could never be reached by it and silently
       // routed requests to the built-in provider instead. Reject at the write
-      // path. Case-sensitive to match the runtime guard exactly.
+      // path. Case-sensitive to match the runtime guard exactly. Prefix is
+      // optional, so this only fires when one is actually supplied.
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: reservedProviderPrefixMessage(value.prefix.trim()),
@@ -389,7 +436,7 @@ export const createProviderNodeSchema = z
 export const updateProviderNodeSchema = z
   .object({
     name: z.string().trim().min(1, "Name is required"),
-    prefix: z.string().trim().min(1, "Prefix is required"),
+    prefix: z.string().trim().min(1).optional().or(z.literal("")),
     apiType: z
       .enum([
         "chat",
@@ -407,15 +454,18 @@ export const updateProviderNodeSchema = z
     // clears a previously stored custom icon.
     iconUrl: providerNodeIconUrlSchema,
     customHeaders: customHeadersSchema,
+    dailyQuotaResetTimezone: dailyQuotaResetTimezoneSchema,
+    dailyQuotaResetHour: dailyQuotaResetHourSchema,
   })
   .superRefine((value, ctx) => {
     // Reserved-prefix guard (tokenrouter bug) — same rationale as the guard in
     // createProviderNodeSchema: renaming a node's prefix onto a built-in
-    // registry id/alias would make it unreachable via that prefix.
-    if (isReservedProviderPrefix(value.prefix)) {
+    // registry id/alias would make it unreachable via that prefix. Prefix is
+    // optional, so this only fires when one is actually supplied.
+    if (value.prefix && isReservedProviderPrefix(value.prefix.trim())) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: reservedProviderPrefixMessage(value.prefix),
+        message: reservedProviderPrefixMessage(value.prefix.trim()),
         path: ["prefix"],
       });
     }
@@ -483,7 +533,7 @@ export const updateProviderConnectionSchema = z
     errorCode: z.union([z.string(), z.null()]).optional(),
     rateLimitedUntil: z.union([z.string(), z.null()]).optional(),
     lastTested: z.union([z.string(), z.null()]).optional(),
-    healthCheckInterval: z.coerce.number().int().min(0).optional(),
+    healthCheckInterval: z.union([z.null(), z.coerce.number().int().min(0).max(1440)]).optional(),
     group: z.union([z.string().max(100), z.null()]).optional(),
     maxConcurrent: z.union([z.null(), z.coerce.number().int().min(0)]).optional(),
     // Per-window quota cutoffs. Map keys are window names (e.g. "window5h",
@@ -516,11 +566,13 @@ export const updateProviderConnectionSchema = z
     rateLimitOverrides: z
       .object({
         rpm: rateLimitOverrideNumber(1_000_000).optional(),
+        rpd: rateLimitOverrideNumber(10_000_000).optional(),
         tpm: rateLimitOverrideNumber(100_000_000).optional(),
         tpd: rateLimitOverrideNumber(10_000_000_000).optional(),
         minTime: rateLimitOverrideNumber(60_000).optional(),
         maxConcurrent: rateLimitOverrideNumber(10_000).optional(),
         maxWaitMs: rateLimitOverrideNumber(120_000).optional(),
+        executionMaxWaitMs: rateLimitOverrideNumber(600_000).optional(),
       })
       .partial()
       .strict()

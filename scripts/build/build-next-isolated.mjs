@@ -13,9 +13,15 @@ import {
 } from "./assembleStandalone.mjs";
 import {
   isBackendOnlyBuild,
+  isContributorBuild,
+  shouldBuildStandalone,
+  stubContributorInstrumentation,
   stubDashboardPages,
   restoreDashboardPages,
 } from "./backendOnlyPages.mjs";
+import { isSkipDocsBuild, stubDocsPages, restoreDocsPages } from "./skipDocsPages.mjs";
+
+export { shouldBuildStandalone } from "./backendOnlyPages.mjs";
 
 /**
  * Layer 1: `app/` has been renamed to `dist/` and the App-Router collision is gone.
@@ -273,10 +279,16 @@ export async function main() {
   // `next build` skips the frontend (client vendor chunks + prerender) while keeping every
   // API route handler. Restored in `finally` and on SIGINT/SIGTERM (git-recoverable regardless).
   let stubbedPages = [];
+  // Skip-docs: descriptor for the moved-out `src/app/docs` subtree (null when not skipping).
+  let movedDocs = null;
   const restoreStubbedPagesOnce = () => {
     if (stubbedPages.length > 0) {
       restoreDashboardPages(stubbedPages);
       stubbedPages = [];
+    }
+    if (movedDocs) {
+      restoreDocsPages(movedDocs);
+      movedDocs = null;
     }
   };
   const onFatalSignal = (signal) => {
@@ -292,11 +304,29 @@ export async function main() {
       movedPaths.push(entry);
     }
 
+    const skipDocs = isSkipDocsBuild();
+
     if (isBackendOnlyBuild()) {
       console.log(
         "[build-next-isolated] OMNIROUTE_BUILD_BACKEND_ONLY set — building API only (dashboard UI stubbed)"
       );
       stubbedPages = stubDashboardPages(projectRoot);
+      if (isContributorBuild()) {
+        stubbedPages.push(...stubContributorInstrumentation(projectRoot));
+        console.log(
+          "[build-next-isolated] Contributor profile: instrumentation entrypoint stubbed for compile-only validation"
+        );
+      }
+    }
+
+    if (skipDocs) {
+      console.log(
+        "[build-next-isolated] OMNIROUTE_SKIP_DOCS=1 — excluding the in-app /docs fumadocs site from the build"
+      );
+      movedDocs = stubDocsPages(projectRoot);
+    }
+
+    if (isBackendOnlyBuild() || skipDocs) {
       process.once("SIGINT", onFatalSignal);
       process.once("SIGTERM", onFatalSignal);
     }
@@ -305,14 +335,26 @@ export async function main() {
 
     const result = await runNextBuild();
     const standaloneDir = path.join(distDir, "standalone");
-    if (result.code === 0 && (await exists(standaloneDir))) {
-      try {
-        await fs.cp(path.join(projectRoot, "docs"), path.join(standaloneDir, "docs"), {
-          recursive: true,
-        });
-        console.log("[build-next-isolated] Copied docs/ to standalone output");
-      } catch (docsCopyErr) {
-        console.warn("[build-next-isolated] Non-fatal error copying docs/:", docsCopyErr?.message);
+    if (result.code === 0 && (await exists(standaloneDir)) && shouldBuildStandalone()) {
+      // When OMNIROUTE_SKIP_DOCS=1 the in-app /docs site is excluded from the build, so
+      // there is no consumer of the raw docs/ folder in the standalone output — skip the
+      // copy to save time/space. Default (flag unset) still copies docs/ exactly as before.
+      if (skipDocs) {
+        console.log(
+          "[build-next-isolated] Skipping docs/ copy to standalone output (OMNIROUTE_SKIP_DOCS=1)"
+        );
+      } else {
+        try {
+          await fs.cp(path.join(projectRoot, "docs"), path.join(standaloneDir, "docs"), {
+            recursive: true,
+          });
+          console.log("[build-next-isolated] Copied docs/ to standalone output");
+        } catch (docsCopyErr) {
+          console.warn(
+            "[build-next-isolated] Non-fatal error copying docs/:",
+            docsCopyErr?.message
+          );
+        }
       }
 
       try {
@@ -372,6 +414,10 @@ export async function main() {
       } catch (assembleErr) {
         console.warn("[build-next-isolated] Non-fatal error assembling standalone:", assembleErr);
       }
+    } else if (result.code === 0 && !shouldBuildStandalone()) {
+      console.log(
+        "[build-next-isolated] Skipped standalone packaging (standalone disabled for fast compile)"
+      );
     }
     process.exitCode = result.code;
   } catch (error) {

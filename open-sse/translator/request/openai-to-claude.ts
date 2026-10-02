@@ -3,9 +3,12 @@ import { FORMATS } from "../formats.ts";
 // CLAUDE_SYSTEM_PROMPT import removed — no longer injected unconditionally (#1966/#2130)
 import { supportsClaudeMaxEffort, supportsXHighEffort } from "../../config/providerModels.ts";
 import { adjustMaxTokens } from "../helpers/maxTokensHelper.ts";
-import { sanitizeToolId } from "../helpers/schemaCoercion.ts";
+import { normalizeClaudeToolInputSchema, sanitizeToolId } from "../helpers/schemaCoercion.ts";
 import { safeParseJSON } from "../helpers/jsonUtil.ts";
-import { applyKimiCodingThinking } from "../helpers/claudeHelper.ts";
+import {
+  applyKimiCodingThinking,
+  createDefaultClaudeCacheControl,
+} from "../helpers/claudeHelper.ts";
 import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 import {
   getDefaultThinkingBudget,
@@ -43,7 +46,13 @@ function applyCopilotSummarizedThinkingDisplay(
   thinking: Record<string, unknown> | undefined,
   body: Record<string, unknown> | null | undefined
 ): Record<string, unknown> | undefined {
-  if (!thinking || !wantsCopilotSummarizedThinking(body) || thinking.type === "disabled") {
+  // `between_tools` (Claude Sonnet 5.5) rejects any extra field, `display` included.
+  if (
+    !thinking ||
+    !wantsCopilotSummarizedThinking(body) ||
+    thinking.type === "disabled" ||
+    thinking.type === "between_tools"
+  ) {
     return thinking;
   }
   return {
@@ -434,15 +443,20 @@ export function openaiToClaudeRequest(model, body, stream, credentials = null) {
         // MCP tools (e.g. pencil, computer_use) may omit properties on object-type schemas.
         const rawSchema: Record<string, unknown> = toolData.parameters ||
           toolData.input_schema || { type: "object", properties: {}, required: [] };
-        const normalizedSchema =
+        const withProperties =
           rawSchema.type === "object" && !rawSchema.properties
             ? { ...rawSchema, properties: {} }
             : rawSchema;
+        // Flatten a root-level anyOf/oneOf/allOf: Anthropic refuses it outright with
+        // "input_schema does not support oneOf, allOf, or anyOf at the top level" (#13552).
+        // Only the root is flattened (nested combinators stay valid). Covers the
+        // API-key claude path, which skips the OAuth-only sanitizeClaudeToolSchemas.
+        const safeSchema = normalizeClaudeToolInputSchema(withProperties);
 
         return {
           name: toolName,
           description: toolData.description || "",
-          input_schema: normalizedSchema,
+          input_schema: safeSchema,
         };
       })
       .filter((tool): tool is ClaudeTool => Boolean(tool));
@@ -454,7 +468,7 @@ export function openaiToClaudeRequest(model, body, stream, credentials = null) {
     // rejects cache_control on defer_loading tools.
     for (let i = result.tools.length - 1; i >= 0; i--) {
       if (!result.tools[i].defer_loading) {
-        result.tools[i].cache_control = { type: "ephemeral", ttl: "1h" };
+        result.tools[i].cache_control = createDefaultClaudeCacheControl(routedProvider);
         break;
       }
     }
@@ -491,7 +505,7 @@ export function openaiToClaudeRequest(model, body, stream, credentials = null) {
     const systemBlock = {
       type: "text",
       text: systemText,
-      cache_control: { type: "ephemeral", ttl: "1h" },
+      cache_control: createDefaultClaudeCacheControl(routedProvider),
     };
     // Merge with existing body.system if present
     if (Array.isArray(body.system)) {
@@ -505,7 +519,13 @@ export function openaiToClaudeRequest(model, body, stream, credentials = null) {
     // No role="system" messages, but body.system exists — pass through as-is
     result.system = Array.isArray(body.system)
       ? body.system
-      : [{ type: "text", text: String(body.system) }];
+      : [
+          {
+            type: "text",
+            text: String(body.system),
+            cache_control: { type: "ephemeral", ttl: "1h" },
+          },
+        ];
   }
 
   // Attach toolNameMap to result for response translation
@@ -622,21 +642,27 @@ function getContentBlocksFromMessage(
           // turn introduced a `signature:""` thinking block, every subsequent Anthropic leg
           // attempt 400'd and the router silently fell back to codex forever.
           //
-          // Fix: strip thinking blocks whose signature is the empty string — that explicit
-          // empty value is the hallmark of a synthesized block from a non-Anthropic provider.
-          // Thinking blocks with `signature: undefined` (field absent) are legitimate Claude-
-          // format messages and fall through to the DEFAULT_THINKING_CLAUDE_SIGNATURE fallback
-          // as before.
-          if (part.type === "thinking" && part.signature === "") {
-            continue; // drop — synthesized by non-Anthropic provider, no valid signature
+          // Fix: strip thinking blocks that carry no signature at all. `signature: ""` is the
+          // shape codex/gpt-5.x emit; a MISSING field is what the response translator produces
+          // from cross-provider `reasoning_content` (#12105). Neither can be replayed to
+          // Anthropic, and fabricating DEFAULT_THINKING_CLAUDE_SIGNATURE is worse than dropping:
+          // prepareClaudeRequest treats any non-empty signature on the latest assistant turn as
+          // genuine and forwards the block verbatim, so the fake signature 400s upstream. This
+          // mirrors the stricter "non-empty string" check already used in claudeHelper.ts.
+          if (part.type === "thinking" && !part.signature) {
+            continue; // drop — no replayable signature (empty or absent)
           }
           if (part.type === "redacted_thinking" && part.data === "") {
             continue; // drop — same: empty data from non-Anthropic provider
           }
-          blocks.push({
-            ...part,
-            signature: part.signature || DEFAULT_THINKING_CLAUDE_SIGNATURE,
-          });
+          blocks.push(
+            part.type === "redacted_thinking"
+              ? { ...part }
+              : {
+                  ...part,
+                  signature: part.signature || DEFAULT_THINKING_CLAUDE_SIGNATURE,
+                }
+          );
         } else if (part.type === "tool_use") {
           // Tool name already has prefix from tool declarations, keep as-is
           // CRITICAL: Skip tool_use blocks with empty name (causes Claude 400 error)
@@ -670,7 +696,7 @@ function getContentBlocksFromMessage(
             type: "tool_use",
             id: sanitizeToolId(tc.id),
             name: toolName,
-            input: tryParseJSON(tc.function.arguments),
+            input: parseToolInput(tc.function.arguments),
           });
         }
       }
@@ -726,8 +752,10 @@ function convertOpenAIToolChoice(choice) {
     if (choice.type === "function" && choice.function?.name) {
       return { type: "tool", name: choice.function.name };
     }
-    // Map OpenAI string types to Claude equivalents
-    if (choice.type === "auto" || choice.type === "none") return { type: "auto" };
+    // Map OpenAI string types to Claude equivalents. Claude has its own "none"; mapping it
+    // to "auto" let the model call tools the client had switched off.
+    if (choice.type === "auto") return { type: "auto" };
+    if (choice.type === "none") return { type: "none" };
     if (choice.type === "required" || choice.type === "any")
       return { type: CLAUDE_TOOL_CHOICE_REQUIRED };
     // If type is "tool" already (Claude-native), pass through
@@ -735,7 +763,8 @@ function convertOpenAIToolChoice(choice) {
     // Fallback: unknown object type — default to auto to avoid 400 errors
     return { type: "auto" };
   }
-  if (choice === "auto" || choice === "none") return { type: "auto" };
+  if (choice === "auto") return { type: "auto" };
+  if (choice === "none") return { type: "none" };
   if (choice === "required") return { type: CLAUDE_TOOL_CHOICE_REQUIRED };
   if (typeof choice === "object" && choice.function) {
     return { type: "tool", name: choice.function.name };
@@ -755,9 +784,10 @@ function extractTextContent(content) {
   return "";
 }
 
-// Try parse JSON (passthrough fallback: return the raw input string on parse error).
-function tryParseJSON(str: unknown): unknown {
-  return safeParseJSON(str, str);
+function parseToolInput(args: unknown): Record<string, unknown> {
+  const parsed = safeParseJSON(args, null);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  return parsed as Record<string, unknown>;
 }
 
 function stripCacheControl(value: unknown): unknown {

@@ -7,7 +7,7 @@
 import { z } from "zod";
 import { NextResponse } from "next/server";
 import { sanitizeErrorMessage } from "@omniroute/open-sse/utils/error";
-import { getWebhooks, createWebhook } from "@/lib/localDb";
+import { getWebhooks, createWebhook } from "@/lib/db/webhooks";
 import { validateBody, isValidationFailure } from "@/shared/validation/helpers";
 import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { encryptMetadata } from "@/lib/webhookDispatcher";
@@ -16,7 +16,7 @@ import { parseAndValidateWebhookUrl } from "@/shared/network/outboundUrlGuardPol
 
 import { WEBHOOK_EVENT_VALUES } from "@/lib/webhooks/eventDescriptions";
 
-const WEBHOOK_KINDS = ["slack", "telegram", "discord", "custom"] as const;
+const WEBHOOK_KINDS = ["slack", "telegram", "discord", "msteams", "custom"] as const;
 const WEBHOOK_EVENT_VALUES_WITH_WILDCARD = ["*", ...WEBHOOK_EVENT_VALUES] as const;
 
 const createWebhookSchema = z

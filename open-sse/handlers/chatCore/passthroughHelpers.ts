@@ -2,11 +2,48 @@ import { FORMATS } from "../../translator/formats.ts";
 import { isVerifiedNativeCodexRequest } from "../../config/codexIdentity.ts";
 import { isClaudeCodeCompatibleProvider } from "../../services/claudeCodeCompatible.ts";
 import { isResponsesEndpointPath } from "../../utils/responsesEndpoint.ts";
+import { mergeClientAnthropicBeta } from "../../config/anthropicHeaders.ts";
 import { getHeaderValueCaseInsensitive } from "./headers.ts";
+import { isClaudeSignatureReplaySafeForModel } from "../../utils/claudeThinkingSignature.ts";
 
 export { isResponsesEndpointPath };
 
 export const XAI_API_PROVIDERS = new Set(["xai", "xai-oauth", "xao"]);
+
+const SAFEGUARDS_PAIRED_BETA = "dangerous-tool-use-2026-09-03";
+
+/**
+ * Top-level fields Claude Code sends that Anthropic accepts only next to their
+ * paired beta. `safeguards` is the auto mode classifier request
+ * (https://code.claude.com/docs/en/auto-mode-classifier-billing); without
+ * `dangerous-tool-use-2026-09-03` on the outbound request, Anthropic rejects
+ * the whole request:
+ *
+ *   400 safeguards: Extra inputs are not permitted
+ *
+ * The executor forwards a client beta only through mergeClientAnthropicBeta, so
+ * the same merge decides here: keep the field when its beta travels with it,
+ * strip it otherwise (the client then falls back to its own classifier).
+ */
+export function unpairedClaudeClientFields(clientAnthropicBeta: string | null | undefined) {
+  const forwarded = mergeClientAnthropicBeta("", clientAnthropicBeta).toLowerCase().split(",");
+  return forwarded.includes(SAFEGUARDS_PAIRED_BETA) ? [] : ["safeguards"];
+}
+
+/**
+ * Drop the top-level fields for which Anthropic's Messages API rejects the
+ * whole request on the native `claude` passthrough, which forwards the client
+ * body verbatim. Third-party Claude-shape gateways are left untouched.
+ */
+export function stripClaudeRejectedTopLevelFields(
+  body: Record<string, unknown>,
+  clientHeaders: Headers | Record<string, unknown> | null | undefined
+): void {
+  // VS Code Claude extension and similar clients send both; Anthropic rejects the pair.
+  if (body.temperature !== undefined && body.top_p !== undefined) delete body.top_p;
+  const clientBeta = getHeaderValueCaseInsensitive(clientHeaders, "anthropic-beta");
+  for (const field of unpairedClaudeClientFields(clientBeta)) delete body[field];
+}
 
 export function shouldUseNativeCodexPassthrough({
   provider,
@@ -53,19 +90,35 @@ export function stampNativeResponsesPassthroughBody(
   return { ...body, _nativeOpenAICompatibleResponsesPassthrough: true };
 }
 
+// A body only qualifies for the native-Responses passthrough fast path when it is
+// actually shaped like a Responses API request (`input`, no `messages`). Endpoint
+// path alone is not sufficient: an internally-synthesized Chat Completions-shaped
+// body (e.g. the context-handoff summary request) can be dispatched through a
+// closure that still carries the original client request's `/responses` endpoint,
+// which otherwise makes `sourceFormat` resolve to "openai-responses" even though
+// the body itself was never translated. See issue #12129.
+function isResponsesShapedBody(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const candidate = body as Record<string, unknown>;
+  return candidate.input !== undefined && candidate.messages === undefined;
+}
+
 export function shouldUseNativeOpenAICompatibleResponsesPassthrough({
   provider,
   sourceFormat,
   endpointPath,
   providerSpecificData,
+  body,
 }: {
   provider?: string | null;
   sourceFormat?: string | null;
   endpointPath?: string | null;
   providerSpecificData?: unknown;
+  body?: unknown;
 }): boolean {
   if (!provider?.startsWith("openai-compatible-")) return false;
   if (sourceFormat !== FORMATS.OPENAI_RESPONSES) return false;
+  if (body !== undefined && !isResponsesShapedBody(body)) return false;
   if (providerSpecificData && typeof providerSpecificData === "object") {
     const psd = providerSpecificData as Record<string, unknown>;
     if (psd.apiType === "responses" || psd._omnirouteForceResponsesUpstream === true) {
@@ -262,6 +315,84 @@ export async function executeWithAnthropicThinkingSignatureRecovery<T>(args: {
     retried: true,
     recoveryBody,
   };
+}
+
+/**
+ * Sanitize replayed `thinking` blocks on the Anthropic-native Claude OAuth passthrough
+ * using CLIProxyAPI's validate-then-preserve-or-drop strategy (internal/signature):
+ * KEEP a thinking block when its signature is safe to replay to the target model,
+ * DROP it otherwise. Blocks are never rewritten in place.
+ *
+ * Three 400s occur when prior assistant thinking blocks are replayed as history:
+ *
+ *   1. messages.N.content.M.thinking: each thinking block must contain thinking
+ *      — Anthropic can emit a `thinking` block with empty visible text plus a valid
+ *        signature (#5108, the non-streaming Bash classifier).
+ *   2. messages.N.content.M: Invalid `signature` in `thinking` block
+ *      — a thinking signature is bound to the exact model that minted it; a combo that
+ *        hops claude-opus → claude-sonnet replays an opus signature to a sonnet target,
+ *        which Anthropic rejects (#2454).
+ *   3. Rewriting the block in place instead (a previous fix) trips "blocks in the latest
+ *      assistant message cannot be modified" (#3775).
+ *
+ * Anthropic forbids *modifying* thinking blocks in the latest assistant turn but ALLOWS
+ * *dropping* them, and Claude has no cross-provider bypass sentinel, so an unsafe block
+ * is dropped rather than rewritten. A block is kept only when
+ * `isClaudeSignatureReplaySafeForModel` confirms its signature is a structurally-valid
+ * Claude signature AND either carries no model tag (compact schema) or a model tag that
+ * matches `targetModel`. This preserves the reasoning chain on same-model multi-turn
+ * (the common case) and drops only the blocks that would actually 400 — the cross-model
+ * combo hop and the empty/foreign/fabricated ones.
+ *
+ * Applied uniformly to every assistant turn (dropping is not a modification). Messages
+ * emptied by the drop are removed so no empty `content: []` reaches Anthropic. Returns
+ * the same array reference when nothing needed dropping.
+ */
+export function sanitizeClaudePassthroughThinkingBlocks(
+  messages: unknown,
+  targetModel: string | null | undefined
+): unknown {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+  let mutated = false;
+  const out: unknown[] = [];
+
+  for (const msg of messages) {
+    const m = msg as { role?: unknown; content?: unknown } | null;
+    if (!m || typeof m !== "object" || m.role !== "assistant" || !Array.isArray(m.content)) {
+      out.push(msg);
+      continue;
+    }
+
+    const blocks = m.content as Array<Record<string, unknown>>;
+    let contentMutated = false;
+    const kept = blocks.filter((block) => {
+      if (!block || typeof block !== "object") return true;
+      if (block.type === "thinking") {
+        if (isClaudeSignatureReplaySafeForModel(block.signature, targetModel)) return true;
+        contentMutated = true;
+        return false;
+      }
+      if (block.type === "redacted_thinking") {
+        // redacted_thinking carries an opaque `data` blob (no inspectable model tag);
+        // its replay safety cannot be verified, so drop it on cross-model-capable combos.
+        contentMutated = true;
+        return false;
+      }
+      return true;
+    });
+
+    if (!contentMutated) {
+      out.push(msg);
+      continue;
+    }
+
+    mutated = true;
+    if (kept.length === 0) continue;
+    out.push({ ...m, content: kept });
+  }
+
+  return mutated ? out : messages;
 }
 
 export function isClaudeCodeSemanticPassthroughRequest({

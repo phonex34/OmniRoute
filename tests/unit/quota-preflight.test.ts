@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import type { QuotaWarnInfo } from "../../open-sse/services/quotaPreflight.ts";
 
 const quotaPreflight = await import("../../open-sse/services/quotaPreflight.ts");
 
@@ -9,6 +10,7 @@ const {
   getQuotaWindows,
   isQuotaPreflightEnabled,
   preflightQuota,
+  evaluateQuotaCutoff,
 } = quotaPreflight;
 
 function createConnection(providerSpecificData = {}) {
@@ -258,9 +260,189 @@ test("preflightQuota (per-window): omitted resolver falls back to the 2% remaini
 
 // ─── Window registry ─────────────────────────────────────────────────────
 
+test("evaluateQuotaCutoff still blocks Claude 5h at 1% remaining when extra usage is blocked", () => {
+  const quota = {
+    used: 0,
+    total: 0,
+    percentUsed: 0.99,
+    windows: {
+      "session (5h)": { percentUsed: 0.99, resetAt: "2026-09-05T12:50:00Z" },
+      "weekly (7d)": { percentUsed: 0.15, resetAt: "2026-09-12T10:00:00Z" },
+    },
+  };
+
+  const defaultBlock = evaluateQuotaCutoff(quota, undefined, { provider: "claude" });
+  assert.equal(defaultBlock.proceed, false);
+  assert.equal(defaultBlock.reason, "quota_exhausted");
+
+  const explicitBlock = evaluateQuotaCutoff(quota, undefined, {
+    provider: "claude",
+    providerSpecificData: { blockExtraUsage: true },
+  });
+  assert.equal(explicitBlock.proceed, false);
+});
+
+test("evaluateQuotaCutoff proceeds on Claude 5h cutoff when extra usage is allowed", () => {
+  const quota = {
+    used: 0,
+    total: 0,
+    percentUsed: 0.99,
+    windows: {
+      "session (5h)": { percentUsed: 0.99, resetAt: "2026-09-05T12:50:00Z" },
+      "weekly (7d)": { percentUsed: 0.15, resetAt: "2026-09-12T10:00:00Z" },
+    },
+  };
+
+  const allowed = evaluateQuotaCutoff(quota, undefined, {
+    provider: "claude",
+    providerSpecificData: { blockExtraUsage: false },
+  });
+  assert.equal(allowed.proceed, true);
+});
+
+test("evaluateQuotaCutoff does not leak the Claude extra-usage bypass to other providers", () => {
+  const quota = {
+    used: 0,
+    total: 0,
+    percentUsed: 0.99,
+    windows: {
+      session: { percentUsed: 0.99, resetAt: null },
+    },
+  };
+
+  const result = evaluateQuotaCutoff(quota, undefined, {
+    provider: "openai",
+    providerSpecificData: { blockExtraUsage: false },
+  });
+  assert.equal(result.proceed, false);
+});
+
+test("preflightQuota proceeds on Claude when extra usage is allowed even at 1% remaining", async () => {
+  registerQuotaFetcher("claude", async () => ({
+    used: 99,
+    total: 100,
+    percentUsed: 0.99,
+    windows: {
+      "session (5h)": { percentUsed: 0.99, resetAt: "2026-09-05T12:50:00Z" },
+    },
+  }));
+
+  const blocked = await preflightQuota(
+    "claude",
+    "conn-extra-block",
+    createConnection({ quotaPreflightEnabled: true })
+  );
+  assert.equal(blocked.proceed, false);
+
+  const allowed = await preflightQuota("claude", "conn-extra-allow", {
+    provider: "claude",
+    providerSpecificData: { blockExtraUsage: false, quotaPreflightEnabled: true },
+  });
+  assert.equal(allowed.proceed, true);
+});
+
 test("registerQuotaWindows / getQuotaWindows round-trips", () => {
   registerQuotaWindows("test-provider", ["a", "b"]);
   assert.deepEqual([...getQuotaWindows("test-provider")], ["a", "b"]);
   // Unknown provider returns an empty list rather than undefined.
   assert.deepEqual([...getQuotaWindows("provider-with-no-registration-anywhere")], []);
+});
+
+// ─── _freetrial window fallback (base exhausted → trial window covers it) ───
+
+test("evaluateQuotaCutoff permits connection when base is exhausted but _freetrial is available", () => {
+  const quota = {
+    used: 50,
+    total: 50,
+    percentUsed: 0,
+    windows: {
+      credit: { percentUsed: 1.0, resetAt: null },
+      credit_freetrial: { percentUsed: 0.0, resetAt: null },
+    },
+  };
+  const result = evaluateQuotaCutoff(quota);
+  assert.equal(result.proceed, true);
+});
+
+test("evaluateQuotaCutoff blocks connection when both base and _freetrial are exhausted", () => {
+  const quota = {
+    used: 50,
+    total: 50,
+    percentUsed: 1.0,
+    windows: {
+      credit: { percentUsed: 1.0, resetAt: null },
+      credit_freetrial: { percentUsed: 1.0, resetAt: null },
+    },
+  };
+  const result = evaluateQuotaCutoff(quota);
+  assert.equal(result.proceed, false);
+  assert.equal(result.reason, "quota_exhausted");
+});
+
+// ─── onWarn callback (feeds the approaching-cutoff webhook) ───────────────
+
+test("preflightQuota (legacy single-signal): onWarn fires with usage details", async () => {
+  const warnPayloads: QuotaWarnInfo[] = [];
+  registerQuotaFetcher("provider-warn-cb", async () => ({
+    used: 80,
+    total: 100,
+    percentUsed: 0.8,
+    resetAt: "2026-06-01T00:00:00Z",
+  }));
+
+  await withPatchedConsole(
+    "warn",
+    () => {},
+    async () =>
+      preflightQuota(
+        "provider-warn-cb",
+        "conn-warn-cb-1",
+        createConnection({ quotaPreflightEnabled: true }),
+        { resolveWarnRemainingPercent: () => 20 },
+        (info) => warnPayloads.push(info)
+      )
+  );
+
+  assert.equal(warnPayloads.length, 1);
+  const { remainingPercent, ...rest } = warnPayloads[0];
+  assert.ok(Math.abs(remainingPercent - 20) < 1e-9);
+  assert.deepEqual(rest, {
+    window: null,
+    used: 80,
+    total: 100,
+    resetAt: "2026-06-01T00:00:00Z",
+  });
+});
+
+test("preflightQuota (per-window): onWarn fires per warning window, not on block", async () => {
+  const warnPayloads: QuotaWarnInfo[] = [];
+  registerQuotaFetcher("provider-warn-cb-win", async () => ({
+    used: 82,
+    total: 100,
+    percentUsed: 0.82,
+    windows: {
+      session: { percentUsed: 0.82, resetAt: "2026-06-10T00:00:00Z" },
+    },
+  }));
+
+  await withPatchedConsole(
+    "warn",
+    () => {},
+    async () =>
+      preflightQuota(
+        "provider-warn-cb-win",
+        "conn-warn-cb-2",
+        createConnection({ quotaPreflightEnabled: true }),
+        {
+          resolveMinRemainingPercent: () => 5,
+          resolveWarnRemainingPercent: () => 20,
+        },
+        (info) => warnPayloads.push(info)
+      )
+  );
+
+  assert.equal(warnPayloads.length, 1);
+  assert.equal(warnPayloads[0].window, "session");
+  assert.equal(warnPayloads[0].resetAt, "2026-06-10T00:00:00Z");
+  assert.ok(Math.abs(warnPayloads[0].remainingPercent - 18) < 1e-9);
 });

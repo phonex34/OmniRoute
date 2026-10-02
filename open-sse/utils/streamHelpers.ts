@@ -70,6 +70,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const ANSI_ESCAPE_RE =
   /\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[A-Z\[\]\\^_`])|[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
 
+// Pre-compiled regex constants for hot-path SSE processing (avoid per-call compilation)
+const CR_STRIP_RE = /\r$/;
+const SSE_FIELD_RE = /^(?:event:|id:|retry:|:)/i;
+const SSE_EVENT_RE = /^event:\s*(.+)$/i;
+const SSE_ID_RETRY_RE = /^(?::|id:|retry:)/i;
+const SSE_EVENT_ONLY_RE = /^event:/i;
+
 /**
  * Strip ANSI/VT100 escape sequences (and stray C0 controls) from a string.
  * Non-string inputs (null/undefined) are returned unchanged. Preserves \t \n \r.
@@ -125,7 +132,7 @@ export function parseSSELine(line: string): SSEJsonPayload | null {
 }
 
 function extractSseDataLine(line: string): string | null {
-  const trimmed = stripAnsiCodes(line.trimStart().replace(/\r$/, ""));
+  const trimmed = stripAnsiCodes(line.trimStart().replace(CR_STRIP_RE, ""));
   if (!trimmed.startsWith("data:")) return null;
   return trimmed.slice(5).trimStart();
 }
@@ -192,14 +199,10 @@ export function createSSEDataLineNormalizer(): SSEDataLineNormalizer {
     normalize(lines: string[]) {
       const output: string[] = [];
       for (const line of lines) {
-        const normalizedLine = line.replace(/\r$/, "");
+        const normalizedLine = line.replace(CR_STRIP_RE, "");
         const trimmed = normalizedLine.trim();
 
-        if (
-          trimmed &&
-          /^(?:event:|id:|retry:|:)/i.test(trimmed) &&
-          hasSelfDescribingPendingDataPayload()
-        ) {
+        if (trimmed && SSE_FIELD_RE.test(trimmed) && hasSelfDescribingPendingDataPayload()) {
           flush(output);
         }
 
@@ -213,7 +216,9 @@ export function createSSEDataLineNormalizer(): SSEDataLineNormalizer {
   };
 }
 
-export function createSSEEventPrefixBuffer(options?: { forwardEvent?: boolean }): SSEEventPrefixBuffer {
+export function createSSEEventPrefixBuffer(options?: {
+  forwardEvent?: boolean;
+}): SSEEventPrefixBuffer {
   let lines: string[] = [];
   let emitted = false;
   // The `event:` line is only part of the SSE framing for protocols that define
@@ -235,7 +240,7 @@ export function createSSEEventPrefixBuffer(options?: { forwardEvent?: boolean })
     },
     eventType() {
       for (let i = lines.length - 1; i >= 0; i--) {
-        const match = lines[i].trim().match(/^event:\s*(.+)$/i);
+        const match = lines[i].trim().match(SSE_EVENT_RE);
         if (match) return match[1].trim();
       }
       return "";
@@ -251,10 +256,10 @@ export function createSSEEventPrefixBuffer(options?: { forwardEvent?: boolean })
       // `id:`/`retry:` and bare `:` comment lines are not part of any of the
       // OpenAI Chat-Completions, OpenAI Responses, or Claude Messages SSE
       // protocols — never buffer (and thus never re-forward) them (#10017).
-      if (/^(?::|id:|retry:)/i.test(trimmed)) return;
+      if (SSE_ID_RETRY_RE.test(trimmed)) return;
       // `event:` framing is only forwarded for protocols that define it; drop it
       // for plain OpenAI Chat-Completions-format clients.
-      if (/^event:/i.test(trimmed) && !forwardEvent) return;
+      if (SSE_EVENT_ONLY_RE.test(trimmed) && !forwardEvent) return;
       lines.push(line);
       emitted = false;
     },
@@ -270,12 +275,7 @@ function hasOpenAICompatibleStreamValue(parsed: Record<string, unknown>): boolea
     const delta = isRecord(choice.delta) ? choice.delta : null;
     if (!delta) return false;
     if (typeof delta.content === "string" && delta.content.length > 0) return true;
-    if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) {
-      return true;
-    }
-    if (typeof delta.reasoning_text === "string" && delta.reasoning_text.length > 0) {
-      return true;
-    }
+    if (hasAnyReasoningSignal(delta)) return true;
     return Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0;
   });
 }
@@ -393,13 +393,21 @@ export function hasValuableContent(chunk: Record<string, unknown>, format: strin
 
   // Claude format
   if (format === FORMATS.CLAUDE) {
+    // A typeless Claude object (e.g. `{}`) serializes to `data: {}` and crashes
+    // strict Anthropic clients with "No matching discriminator" at path ["type"].
+    if (typeof chunk.type !== "string" || chunk.type.length === 0) return false;
     const isContentBlockDelta = chunk.type === "content_block_delta";
     if (isContentBlockDelta) {
       const delta = isRecord(chunk.delta) ? chunk.delta : {};
       const hasText = typeof delta.text === "string" && delta.text.length > 0;
       const hasThinking = typeof delta.thinking === "string" && delta.thinking.length > 0;
       const hasInputJson = typeof delta.partial_json === "string" && delta.partial_json.length > 0;
-      if (!hasText && !hasThinking && !hasInputJson) return false;
+      // A signature_delta carries the thinking block's cryptographic signature in
+      // `delta.signature` with no text/thinking/partial_json. Dropping it as "empty"
+      // strips the signature from the client's thinking block, so the next multi-turn
+      // replay sends an unsigned thinking block that Anthropic then rejects.
+      const hasSignature = typeof delta.signature === "string" && delta.signature.length > 0;
+      if (!hasText && !hasThinking && !hasInputJson && !hasSignature) return false;
     }
     return true;
   }
@@ -483,7 +491,11 @@ export function formatSSE(data: unknown, sourceFormat: string): string {
   data = cleanPerfMetrics(data);
 
   // Claude format
-  if (sourceFormat === FORMATS.CLAUDE && isRecord(data) && data.type) {
+  if (sourceFormat === FORMATS.CLAUDE && isRecord(data)) {
+    // Drop typeless Claude payloads: serializing `{}` here crashes strict Anthropic
+    // clients (zod discriminatedUnion on `type`, path ["type"]). Last-line defense for
+    // every Claude SSE path, not just passthrough.
+    if (typeof data.type !== "string" || data.type.length === 0) return "";
     return `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`;
   }
 
