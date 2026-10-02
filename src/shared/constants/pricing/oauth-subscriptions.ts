@@ -23,6 +23,9 @@ const ANTIGRAVITY_GEMINI_3_7_PRICING = {
 // Codex Standard: 250 / 25 / 1250 credits per MTok, at 25 credits per USD.
 // https://developers.openai.com/codex/pricing
 const GPT_6_ASTRA_CODEX_PRICING = GPT_6_ASTRA_PRICING;
+// GPT-6.1 Sol: 50 / 2.5 / 250 Standard credits per MTok, at 25 credits/USD.
+// Codex's credit card does not specify a separate cache-write rate.
+const GPT_6_1_SOL_CODEX_PRICING = { input: 2, output: 10, cached: 0.1, reasoning: 10 };
 // Codex Standard: Sol 50 / 5 / 250 and Luna 2.5 / 0.25 / 12.5 credits per MTok.
 const GPT_6_SOL_CODEX_PRICING = {
   input: 2.0,
@@ -108,6 +111,13 @@ export const DEFAULT_PRICING_OAUTH = {
     },
   },
   cx: {
+    "gpt-6.1-sol": GPT_6_1_SOL_CODEX_PRICING,
+    "gpt-6.1-sol-ultra": GPT_6_1_SOL_CODEX_PRICING,
+    "gpt-6.1-sol-max": GPT_6_1_SOL_CODEX_PRICING,
+    "gpt-6.1-sol-xhigh": GPT_6_1_SOL_CODEX_PRICING,
+    "gpt-6.1-sol-high": GPT_6_1_SOL_CODEX_PRICING,
+    "gpt-6.1-sol-medium": GPT_6_1_SOL_CODEX_PRICING,
+    "gpt-6.1-sol-low": GPT_6_1_SOL_CODEX_PRICING,
     "gpt-6-astra": GPT_6_ASTRA_CODEX_PRICING,
     "gpt-6-astra-ultra": GPT_6_ASTRA_CODEX_PRICING,
     "gpt-6-astra-max": GPT_6_ASTRA_CODEX_PRICING,
