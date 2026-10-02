@@ -102,7 +102,7 @@ test("GPT-6.1 Sol uses the catalog medium default without changing explicit effo
       capabilities: { reasoning: true },
     };
     assert.deepEqual(reasoningMetadata.getReasoningEffortValues(model), EFFORTS);
-    assert.equal(reasoningMetadata.getDefaultReasoningEffort(model), "medium");
+    assert.equal(reasoningMetadata.getDefaultReasoningEffort(model), "low");
     assert.equal(reasoningMetadata.getReasoningVariantBaseModelId(`${model.id}-ultra`), model.id);
     assert.equal(supportsVscodeServiceTierVariants(model), true);
   }
@@ -113,7 +113,7 @@ test("GPT-6.1 Sol uses the catalog medium default without changing explicit effo
   );
 });
 
-test("GPT-6.1 Sol USD pricing uses the current Standard rates and the GPT-6 Fast multiplier", () => {
+test("GPT-6.1 Sol USD pricing uses the current Standard rates and the 2x purchased-credit Fast multiplier", () => {
   for (const [provider, ids] of [
     ["openai", [MODEL]],
     ["cx", IDS],
@@ -128,15 +128,15 @@ test("GPT-6.1 Sol USD pricing uses the current Standard rates and the GPT-6 Fast
       if (provider === "openai") assert.equal(price.cache_creation, 2.5);
       assert.equal(
         getCodexFastCostMultiplier(provider, id, "priority"),
-        provider === "cx" ? 2.5 : 1
+        provider === "cx" ? 2 : 1
       );
     }
   }
-  assert.equal(getCodexFastCostMultiplier("codex", `${MODEL}-ultra`, "fast"), 2.5);
+  assert.equal(getCodexFastCostMultiplier("codex", `${MODEL}-ultra`, "fast"), 2);
   assert.equal(getCodexFastCostMultiplier("codex", MODEL, "default"), 1);
   const price = getPricingForModel("cx", MODEL);
   assert.ok(price);
-  // 500 uncached input + 500 cached input + 100 output = $0.00205, Fast (2.5x) = $0.005125.
+  // 500 uncached input + 500 cached input + 100 output = $0.00205, Fast (2x) = $0.0041.
   const tokens = { prompt_tokens: 1000, cached_tokens: 500, completion_tokens: 100 };
   assert.ok(
     Math.abs(
@@ -144,7 +144,7 @@ test("GPT-6.1 Sol USD pricing uses the current Standard rates and the GPT-6 Fast
         provider: "codex",
         model: MODEL,
         serviceTier: "priority",
-      }) - 0.005125
+      }) - 0.0041
     ) < 1e-12
   );
 });

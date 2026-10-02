@@ -126,7 +126,7 @@ test("VS Code reasoning metadata knows GPT-6.1 Sol efforts and defaults", () => 
   const model = { id: `cx/${MODEL}`, owned_by: "codex", capabilities: { reasoning: true } };
   const values = reasoningMetadata.getReasoningEffortValues(model);
   assert.deepEqual(values, ["low", "medium", "high", "xhigh", "max", "ultra"]);
-  assert.equal(reasoningMetadata.getDefaultReasoningEffort(model), "medium");
+  assert.equal(reasoningMetadata.getDefaultReasoningEffort(model), "low");
 });
 
 test("Parenthesized Sol effort overrides keep the reasoning summary", () => {
@@ -149,8 +149,8 @@ test("GPT-6.1 Sol Codex pricing and existing Fast usage multiplier remain distin
     assert.equal(pricing.output, 10, id);
     assert.equal(pricing.reasoning, 10, id);
     assert.equal(pricing.cache_creation, 2.5, id);
-    assert.equal(getCodexFastCostMultiplier("codex", id, "priority"), 2.5, id);
-    assert.equal(getCodexFastCostMultiplier("cx", id, "fast"), 2.5, id);
+    assert.equal(getCodexFastCostMultiplier("codex", id, "priority"), 2, id);
+    assert.equal(getCodexFastCostMultiplier("cx", id, "fast"), 2, id);
     assert.equal(getCodexFastCostMultiplier("codex", id, "default"), 1, id);
   }
 });
