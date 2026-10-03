@@ -16,6 +16,7 @@ import {
   createDirectivePreambleStripper,
   createSystemPreambleStripper,
 } from "../../utils/directivePreambleStripper.ts";
+import { readUsageReasoningTokens } from "../../services/errorClassifier.ts";
 
 function normalizeToolName(name: string): string {
   return REVERSE_MAP[name] ?? name;
@@ -279,8 +280,13 @@ function trackUsageFromChunk(chunk, state) {
     state.usage.cache_creation_input_tokens = cacheCreateTokens;
   }
 
-  // Note: completion_tokens_details.reasoning_tokens is already included in output_tokens
-  // No need to add separately as Claude expects total output_tokens
+  // Reasoning is already included in output_tokens: retain its breakdown, never
+  // add it to the total. Downstream empty-turn checks need this provenance when
+  // Codex's encrypted reasoning has no visible text.
+  const reasoningTokens = readUsageReasoningTokens(chunk.usage);
+  if (reasoningTokens > 0) {
+    state.usage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+  }
 }
 
 // Convert OpenAI stream chunk to Claude format
@@ -542,6 +548,38 @@ export function openaiToClaudeResponse(chunk, state) {
     }
   }
 
+  // Refusal is user-visible output, not reasoning or content to sanitize.
+  let refusalText = typeof delta?.refusal === "string" ? delta.refusal : "";
+  if (refusalText && !state.hasRefusal) {
+    refusalText = (state.pendingRefusalWhitespace ?? "") + refusalText;
+    if (refusalText.trim().length === 0) {
+      state.pendingRefusalWhitespace = refusalText;
+      refusalText = "";
+    } else {
+      state.pendingRefusalWhitespace = undefined;
+    }
+  }
+  if (refusalText) {
+    state.hasRefusal = true;
+    stopThinkingBlock(state, results);
+    flushMarkdownBuffer(state, results);
+    if (!state.textBlockStarted) {
+      state.textBlockIndex = state.nextBlockIndex++;
+      state.textBlockStarted = true;
+      state.textBlockClosed = false;
+      results.push({
+        type: "content_block_start",
+        index: state.textBlockIndex,
+        content_block: { type: "text", text: "" },
+      });
+    }
+    results.push({
+      type: "content_block_delta",
+      index: state.textBlockIndex,
+      delta: { type: "text_delta", text: refusalText },
+    });
+  }
+
   // Tool calls
   if (delta?.tool_calls) {
     for (const tc of delta.tool_calls) {
@@ -653,6 +691,7 @@ export function openaiToClaudeResponse(chunk, state) {
     }
 
     state.claudeFinishEmitted = true;
+    state.pendingRefusalWhitespace = undefined;
     stopThinkingBlock(state, results);
 
     // Both preamble strippers buffer while a construct is still undecided (a
@@ -796,6 +835,8 @@ function convertFinishReason(reason) {
       return "max_tokens";
     case "tool_calls":
       return "tool_use";
+    case "content_filter":
+      return "refusal";
     default:
       // Gemini/Antigravity abort reasons (e.g. MALFORMED_FUNCTION_CALL,
       // UNEXPECTED_TOOL_CALL — see isAbortFinishReason) reach here unrecognized
