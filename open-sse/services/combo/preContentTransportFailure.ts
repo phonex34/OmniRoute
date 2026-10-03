@@ -70,6 +70,14 @@ export function hasTransportReplayBoundary(parsed: unknown, eventType: string): 
   )
     return true;
   if (!isRecord(parsed)) return false;
+  // Emitted Responses items/parts are replay boundaries even when empty; content
+  // checks may treat them as valueless, but the upstream turn already committed them.
+  if (
+    (eventType === "response.output_item.added" || eventType === "response.output_item.done") &&
+    isRecord(parsed.item)
+  )
+    return true;
+  if (eventType === "response.content_part.added" && isRecord(parsed.part)) return true;
   if (isKnownNonClaudeStreamPayload(parsed, eventType) || hasOpenAIFinishReason(parsed))
     return true;
   if (eventType === "message_delta" && isRecord(parsed.delta) && parsed.delta.stop_reason != null)
