@@ -29,11 +29,25 @@ import { sanitizeToolId } from "../translator/helpers/schemaCoercion.ts";
 import { stripEmptyOptionalToolArgs } from "../translator/response/openai-responses/pureHelpers.ts";
 import { geminiExtraUsageCounts } from "../translator/response/geminiUsageMetadata.ts";
 import {
+  isSuccessfulResponsesCompletion,
+  readUsageOutputTokens,
+  readUsageReasoningTokens,
+} from "../services/errorClassifier.ts";
+import { isEstimatedUsage } from "../utils/usageTracking.ts";
+import {
   extractThinkingFromContent,
   shouldParseTextualReasoningTags,
 } from "./responseSanitizer/reasoning.ts";
 
 type JsonRecord = Record<string, unknown>;
+
+const NON_SUCCESS_TERMINAL_REASONS: Record<string, true> = {
+  failed: true,
+  incomplete: true,
+  cancelled: true,
+  in_progress: true,
+  unknown: true,
+};
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
@@ -282,10 +296,12 @@ export function translateNonStreamingResponse(
     }
 
     const message: JsonRecord = { role: "assistant" };
-    const refusal = extractMessageOutputText(
+    // Whitespace-only refusal is not client-usable output (no fake successful turn).
+    const extractedRefusal = extractMessageOutputText(
       messageSelection.messageItems[messageSelection.selectedMessageIndex] ?? {},
       true
     );
+    const refusal = extractedRefusal.trim().length > 0 ? extractedRefusal : "";
     if (refusal) message.refusal = refusal;
     if (textContent) {
       message.content = textContent;
@@ -303,6 +319,7 @@ export function translateNonStreamingResponse(
       (!message.content ||
         (typeof message.content === "string" && message.content.trim().length === 0)) &&
       toolCalls.length === 0 &&
+      !refusal &&
       replayableReasoningContent &&
       replayableReasoningContent.trim().length > 0
     ) {
@@ -325,12 +342,31 @@ export function translateNonStreamingResponse(
 
     const createdAt = toNumber(response.created_at, Math.floor(Date.now() / 1000));
     const model = toString(response.model || responseRoot.model, "openai-responses");
+    // A completed item is not a successful response terminal. Keep failures and
+    // unconfirmed silent responses out of the normal-stop acceptance boundary.
     // Same rule as the streaming path (#15867): an incomplete response is a
     // truncated or filtered turn, not a clean stop.
-    const finishReason = computeFinishReason({
-      toolCallIndex: toolCalls.length,
-      incompleteReason: toRecord(response.incomplete_details).reason,
-    });
+    const incompleteReason = toRecord(response.incomplete_details).reason;
+    const legacyVisibleOutput =
+      response.status == null &&
+      response.error == null &&
+      response.incomplete_details == null &&
+      Boolean(textContent || replayableReasoningContent || toolCalls.length > 0);
+    const finishReason = refusal
+      ? "content_filter"
+      : isSuccessfulResponsesCompletion(response) || legacyVisibleOutput
+        ? computeFinishReason({ toolCallIndex: toolCalls.length, incompleteReason })
+        : response.error != null
+          ? "failed"
+          : response.incomplete_details != null
+            ? incompleteReason === "max_output_tokens"
+              ? "length"
+              : incompleteReason === "content_filter"
+                ? "content_filter"
+                : "incomplete"
+            : toString(response.status) === "completed"
+              ? "failed"
+              : toString(response.status, "unknown");
 
     const result: JsonRecord = {
       id: `chatcmpl-${toString(response.id, String(Date.now()))}`,
@@ -387,6 +423,9 @@ export function translateNonStreamingResponse(
         completion_tokens: outputTokens,
         total_tokens: promptTokens + outputTokens,
       };
+      if (isEstimatedUsage(usage)) {
+        (result.usage as JsonRecord).estimated = true;
+      }
 
       if (reasoningTokens > 0) {
         (result.usage as JsonRecord).completion_tokens_details = {
@@ -926,9 +965,21 @@ function convertOpenAINonStreamingToClaude(
   const choiceObj = choice ? toRecord(choice) : {};
   const messageObj = choiceObj.message ? toRecord(choiceObj.message) : {};
 
+  const usageSrc = toRecord(openaiResponse.usage);
+  // This converter has no provider identity: preserve structurally silent
+  // successful turns with reported generation; provider trust is checked by
+  // the caller, not manufactured by a text placeholder here.
+  const preserveSilentContent =
+    choiceObj.finish_reason === "stop" &&
+    !isEstimatedUsage(usageSrc) &&
+    (readUsageOutputTokens(usageSrc) > 0 || readUsageReasoningTokens(usageSrc) > 0);
   const content: JsonRecord[] = [];
 
   let hasTextOrReasoning = false;
+  const refusalText =
+    typeof messageObj.refusal === "string" && messageObj.refusal.trim().length > 0
+      ? messageObj.refusal
+      : "";
 
   const reasoningText = resolveReasoningText(messageObj);
   // `requestedThinking === false` (client explicitly opted out): mirror the
@@ -948,16 +999,20 @@ function convertOpenAINonStreamingToClaude(
     });
   }
 
-  // Always include text if it exists (even empty string), or if there are no tool calls and no reasoning
+  // Retain the generic empty-response guard unless generation proves a silent stop.
   const hasToolCalls = Array.isArray(messageObj.tool_calls) && messageObj.tool_calls.length > 0;
 
-  if (typeof messageObj.refusal === "string" && messageObj.refusal) {
+  if (refusalText) {
     hasTextOrReasoning = true;
     if (typeof messageObj.content === "string" && messageObj.content) {
       content.push({ type: "text", text: messageObj.content });
     }
-    content.push({ type: "text", text: messageObj.refusal });
-  } else if (messageObj.content !== undefined && messageObj.content !== null) {
+    content.push({ type: "text", text: refusalText });
+  } else if (
+    messageObj.content !== undefined &&
+    messageObj.content !== null &&
+    !(preserveSilentContent && messageObj.content === "")
+  ) {
     hasTextOrReasoning = true;
     const resolvedText = toString(messageObj.content);
     // #15764: no placeholder text block next to tool_use when the text is empty.
@@ -977,7 +1032,7 @@ function convertOpenAINonStreamingToClaude(
       type: "text",
       text: reasoningText,
     });
-  } else if (!hasTextOrReasoning) {
+  } else if (!hasTextOrReasoning && !preserveSilentContent) {
     content.push({
       type: "text",
       text: "(empty response)",
@@ -1001,9 +1056,13 @@ function convertOpenAINonStreamingToClaude(
     }
   }
 
-  const stopReason = openAIFinishReasonToClaudeStopReason(choiceObj.finish_reason);
+  // Non-success Responses terminals must not collapse into a clean end_turn.
+  // Keep the shared release mapper for all ordinary cross-vendor finish reasons.
+  const rawFinishReason = toString(choiceObj.finish_reason, "stop");
+  const stopReason = Object.hasOwn(NON_SUCCESS_TERMINAL_REASONS, rawFinishReason)
+    ? rawFinishReason
+    : openAIFinishReasonToClaudeStopReason(rawFinishReason);
 
-  const usageSrc = toRecord(openaiResponse.usage);
   const promptTokens = toNumber(usageSrc.prompt_tokens, 0);
   const outputTokens = toNumber(usageSrc.completion_tokens, 0);
 
@@ -1024,6 +1083,13 @@ function convertOpenAINonStreamingToClaude(
     input_tokens: inputTokens,
     output_tokens: outputTokens,
   };
+  const reasoningTokens = readUsageReasoningTokens(usageSrc);
+  if (reasoningTokens > 0) {
+    usage.reasoning_tokens = reasoningTokens;
+  }
+  if (isEstimatedUsage(usageSrc)) {
+    usage.estimated = true;
+  }
 
   // Add cache_read_input_tokens if present
   if (cachedTokens > 0) {
