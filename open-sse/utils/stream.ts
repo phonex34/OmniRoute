@@ -2,6 +2,7 @@ import { translateResponse, initState } from "../translator/index.ts";
 import { FORMATS } from "../translator/formats.ts";
 import { appendRequestLog } from "@/lib/usageDb";
 import { clearPendingRequestOnce } from "./pendingRequestCleanup.ts";
+import { isTrustedEmptyStop, readUsageReasoningTokens } from "../services/errorClassifier.ts";
 import {
   extractUsage,
   hasValidUsage,
@@ -28,7 +29,7 @@ import {
   injectThinkingSignature,
 } from "./streamHelpers.ts";
 import { rejectEmptyChoicesStream, buildEmptyChoicesStreamError } from "./streamEmptyChoices.ts";
-import { shouldAbortEmptyClaudeStream } from "./streamClaudeEmptyBody.ts";
+import { isCleanEmptyClaudeStop, shouldAbortEmptyClaudeStream } from "./streamClaudeEmptyBody.ts";
 import { calculateCost } from "@/lib/usage/costCalculator";
 import { buildOmniRouteSseMetadataComment } from "@/domain/omnirouteResponseMeta";
 import { sseCommentsEnabled } from "./sseHeartbeat.ts";
@@ -464,6 +465,8 @@ type ClaudeEmptyResponseLifecycle = {
   hasMessageDelta: boolean;
   hasMessageStop: boolean;
   hasError: boolean;
+  stopReason: string | null;
+  reasoningTokens: number;
   syntheticContentInjected: boolean;
   warningLogged: boolean;
 };
@@ -477,6 +480,8 @@ function createClaudeEmptyResponseLifecycle(): ClaudeEmptyResponseLifecycle {
     hasMessageDelta: false,
     hasMessageStop: false,
     hasError: false,
+    stopReason: null,
+    reasoningTokens: 0,
     syntheticContentInjected: false,
     warningLogged: false,
   };
@@ -508,9 +513,14 @@ function updateClaudeEmptyResponseLifecycle(
     case "content_block_stop":
       lifecycle.hasContentBlock = true;
       break;
-    case "message_delta":
+    case "message_delta": {
       lifecycle.hasMessageDelta = true;
+      const record = asRecord(payload);
+      const reason = asRecord(record.delta).stop_reason;
+      if (typeof reason === "string") lifecycle.stopReason = reason;
+      lifecycle.reasoningTokens = readUsageReasoningTokens(record.usage);
       break;
+    }
     case "message_stop":
       lifecycle.hasMessageStop = true;
       break;
@@ -991,7 +1001,39 @@ export function createSSEStream(options: StreamOptions = {}) {
   // #12398: `timing.firstByteAt` doubles as "any upstream chunk ever arrived".
   const shouldAbortClaudeStream = () =>
     clientExpectsClaudeStream &&
-    shouldAbortEmptyClaudeStream(claudeEmptyResponseLifecycle, timing.firstByteAt !== null);
+    !(
+      claudeEmptyResponseLifecycle.hasMessageStop &&
+      isTrustedEmptyStop(
+        provider,
+        claudeEmptyResponseLifecycle.stopReason,
+        claudeEmptyResponseLifecycle.reasoningTokens
+      )
+    ) &&
+    shouldAbortEmptyClaudeStream(
+      claudeEmptyResponseLifecycle,
+      timing.firstByteAt !== null,
+      provider
+    );
+  const shouldAbortEmptyClaudePassthroughEvent = (payload: unknown): boolean => {
+    if (!shouldInjectClaudeEmptyResponseBeforeCurrentEvent(claudeEmptyResponseLifecycle, payload)) {
+      return false;
+    }
+    const record = asRecord(payload);
+    const isMessageDelta = getClaudeEventType(payload) === "message_delta";
+    // An event: header has no stop reason or usage yet. Inspect its data:
+    // payload before deciding; flush still rejects a missing message_stop.
+    if (isMessageDelta && !record.delta) return false;
+    const reason = isMessageDelta
+      ? asRecord(record.delta).stop_reason
+      : claudeEmptyResponseLifecycle.stopReason;
+    const reasoning = isMessageDelta
+      ? readUsageReasoningTokens(record.usage)
+      : claudeEmptyResponseLifecycle.reasoningTokens;
+    return !(
+      isCleanEmptyClaudeStop(reason, provider, reasoning) ||
+      isTrustedEmptyStop(provider, reason, reasoning)
+    );
+  };
   // `event:` framing is only part of the SSE protocol for OpenAI Responses API
   // and Claude Messages API passthrough; a plain OpenAI Chat-Completions-format
   // client has no `event:` field at all, so it is dropped to stop upstream
@@ -1193,8 +1235,16 @@ export function createSSEStream(options: StreamOptions = {}) {
       sourceFormat === FORMATS.CLAUDE &&
       shouldInjectClaudeEmptyResponseBeforeCurrentEvent(claudeEmptyResponseLifecycle, itemSanitized)
     ) {
-      emitClaudeEmptyStreamErrorAndAbort(controller);
-      return;
+      // A normal trusted empty stop is provisional until message_stop arrives;
+      // the flush guard still rejects a truncated lifecycle. Do not invent text
+      // or a thinking signature for Codex's encrypted reasoning.
+      // Claude conversion maps unknown OpenAI finish reasons to end_turn;
+      // trust the original reason, not that lossy projection.
+      const stopReason = state?.finishReason;
+      if (!isTrustedEmptyStop(provider, stopReason, readUsageReasoningTokens(state?.usage))) {
+        emitClaudeEmptyStreamErrorAndAbort(controller);
+        return;
+      }
     }
 
     if (sourceFormat === FORMATS.CLAUDE && isClaudeEventPayload(itemSanitized)) {
@@ -1440,11 +1490,7 @@ export function createSSEStream(options: StreamOptions = {}) {
 
             if (/^event:/i.test(trimmed)) {
               const eventType = trimmed.replace(/^event:\s*/i, "");
-              if (
-                shouldInjectClaudeEmptyResponseBeforeCurrentEvent(claudeEmptyResponseLifecycle, {
-                  type: eventType,
-                })
-              ) {
+              if (shouldAbortEmptyClaudePassthroughEvent({ type: eventType })) {
                 emitClaudeEmptyStreamErrorAndAbort(controller);
                 return;
               }
@@ -1890,12 +1936,7 @@ export function createSSEStream(options: StreamOptions = {}) {
                     if (eu.cache_creation_input_tokens)
                       u.cache_creation_input_tokens = eu.cache_creation_input_tokens;
                   }
-                  if (
-                    shouldInjectClaudeEmptyResponseBeforeCurrentEvent(
-                      claudeEmptyResponseLifecycle,
-                      parsed
-                    )
-                  ) {
+                  if (shouldAbortEmptyClaudePassthroughEvent(parsed)) {
                     emitClaudeEmptyStreamErrorAndAbort(controller);
                     return;
                   }
@@ -2545,11 +2586,7 @@ export function createSSEStream(options: StreamOptions = {}) {
                 skipPassthroughEvent = value;
               },
               clearPendingPassthroughEvent,
-              shouldAbortOnClaudeLifecycle: (payload: unknown) =>
-                shouldInjectClaudeEmptyResponseBeforeCurrentEvent(
-                  claudeEmptyResponseLifecycle,
-                  payload
-                ),
+              shouldAbortOnClaudeLifecycle: shouldAbortEmptyClaudePassthroughEvent,
               emitClaudeEmptyStreamErrorAndAbort: () =>
                 emitClaudeEmptyStreamErrorAndAbort(controller),
               isClaudeEventPayload,
@@ -2634,12 +2671,7 @@ export function createSSEStream(options: StreamOptions = {}) {
                 }
                 if (sanitizeUsagePayloadForRequest(bufferedPayload, body, clientResponseFormat))
                   output = `data: ${JSON.stringify(bufferedPayload)}\n\n`;
-                if (
-                  shouldInjectClaudeEmptyResponseBeforeCurrentEvent(
-                    claudeEmptyResponseLifecycle,
-                    bufferedPayload
-                  )
-                ) {
+                if (shouldAbortEmptyClaudePassthroughEvent(bufferedPayload)) {
                   emitClaudeEmptyStreamErrorAndAbort(controller);
                   return;
                 }

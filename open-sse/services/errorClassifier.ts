@@ -17,24 +17,66 @@ const LEGIT_EMPTY_CLAUDE_STOP = new Set(["max_tokens", "tool_use"]);
 const LEGIT_EMPTY_OPENAI_FINISH = new Set(["length", "tool_calls", "content_filter"]);
 
 // #14160: first-party APIs where an empty completion carrying a NORMAL terminal
-// stop reason ("stop" / "end_turn") is a real answer — some prompts legitimately
+// stop reason ("stop" / "end_turn" / "stop_sequence") is a real answer — some prompts legitimately
 // produce no text — not a disguised upstream failure. The fake-success guard
 // exists for free-tier/scraping providers (pollinations, perplexity-web — #13461)
 // whose failure mode is an empty 200 shell; flagging a first-party empty stop
 // turned valid answers into synthetic 502s that fed model lockout and drained
-// the reporter's whole connection pool. Providers outside this set keep the
+// the reporter's whole connection pool. Providers outside this map keep the
 // guard unchanged, including on empty stop completions.
-const TRUSTED_EMPTY_STOP_PROVIDERS = new Set(["antigravity"]);
-const NORMAL_STOP_OPENAI_FINISH = new Set(["stop"]);
-const NORMAL_STOP_CLAUDE_STOP = new Set(["end_turn"]);
+//
+// `requireReasoning`: the completion must also report reasoning_tokens > 0 —
+// proof the model actually ran and chose to say nothing. Codex reasoning is
+// encrypted and never forwarded, so a silent turn (e.g. a watchdog agent told
+// "silence preferred") arrives as content:null + stop + usage.reasoning_tokens;
+// an empty shell with no reasoning stays suspicious.
+const TRUSTED_EMPTY_STOP_PROVIDERS: Record<string, { requireReasoning: boolean }> = {
+  antigravity: { requireReasoning: false },
+  codex: { requireReasoning: true },
+};
+const NORMAL_STOP_REASONS: Record<string, true> = {
+  stop: true,
+  end_turn: true,
+  stop_sequence: true,
+};
+
+/**
+ * True when an empty completion is a legitimate answer rather than a fake
+ * success: a trusted first-party provider ended the turn with a normal stop
+ * reason (and, where the provider requires it, reported reasoning tokens).
+ * Shared by the non-streaming check, the stream content watcher, and the
+ * combo quality gate so all three paths apply one rule.
+ */
+export function isTrustedEmptyStop(
+  provider: string | null | undefined,
+  stopReason: unknown,
+  reasoningTokens = 0
+): boolean {
+  if (typeof provider !== "string" || !Object.hasOwn(TRUSTED_EMPTY_STOP_PROVIDERS, provider)) {
+    return false;
+  }
+  if (typeof stopReason !== "string" || !Object.hasOwn(NORMAL_STOP_REASONS, stopReason)) {
+    return false;
+  }
+  return !TRUSTED_EMPTY_STOP_PROVIDERS[provider].requireReasoning || reasoningTokens > 0;
+}
+
+/** Reasoning token count from an OpenAI chat, Responses, or flat usage object. */
+export function readUsageReasoningTokens(usage: unknown): number {
+  if (!usage || typeof usage !== "object") return 0;
+  const record = usage as Record<string, unknown>;
+  const details = (record.completion_tokens_details ?? record.output_tokens_details) as
+    Record<string, unknown> | undefined;
+  const raw = details?.reasoning_tokens ?? record.reasoning_tokens;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+}
 
 export function isEmptyContentResponse(
   responseBody: unknown,
   opts?: { provider?: string | null }
 ): boolean {
-  const trustedEmptyStop =
-    typeof opts?.provider === "string" && TRUSTED_EMPTY_STOP_PROVIDERS.has(opts.provider);
   if (!responseBody || typeof responseBody !== "object") return false;
+  const provider = opts?.provider;
 
   const body = responseBody as Record<string, unknown>;
 
@@ -67,7 +109,9 @@ export function isEmptyContentResponse(
     // #14160: on a trusted first-party API, an empty completion that stopped
     // normally is a valid answer — pass it through as a 200 instead of
     // rewriting it into a synthetic 502.
-    if (trustedEmptyStop && NORMAL_STOP_OPENAI_FINISH.has(finishReason)) return false;
+    if (isTrustedEmptyStop(provider, finishReason, readUsageReasoningTokens(body.usage))) {
+      return false;
+    }
 
     return !hasContent && !hasReasoning && !hasToolCalls;
   }
@@ -79,7 +123,9 @@ export function isEmptyContentResponse(
     // failure. Only flag empty content when no such terminal stop_reason is present.
     const stopReason = typeof body.stop_reason === "string" ? body.stop_reason : "";
     // #14160: same exemption for the Claude wire shape on trusted first-party APIs.
-    if (trustedEmptyStop && NORMAL_STOP_CLAUDE_STOP.has(stopReason)) return false;
+    if (isTrustedEmptyStop(provider, stopReason, readUsageReasoningTokens(body.usage))) {
+      return false;
+    }
     return !LEGIT_EMPTY_CLAUDE_STOP.has(stopReason);
   }
 

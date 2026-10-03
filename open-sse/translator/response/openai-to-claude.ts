@@ -16,6 +16,7 @@ import {
   createDirectivePreambleStripper,
   createSystemPreambleStripper,
 } from "../../utils/directivePreambleStripper.ts";
+import { readUsageReasoningTokens } from "../../services/errorClassifier.ts";
 
 function normalizeToolName(name: string): string {
   return REVERSE_MAP[name] ?? name;
@@ -279,8 +280,13 @@ function trackUsageFromChunk(chunk, state) {
     state.usage.cache_creation_input_tokens = cacheCreateTokens;
   }
 
-  // Note: completion_tokens_details.reasoning_tokens is already included in output_tokens
-  // No need to add separately as Claude expects total output_tokens
+  // Reasoning is already included in output_tokens: retain its breakdown, never
+  // add it to the total. Downstream empty-turn checks need this provenance when
+  // Codex's encrypted reasoning has no visible text.
+  const reasoningTokens = readUsageReasoningTokens(chunk.usage);
+  if (reasoningTokens > 0) {
+    state.usage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+  }
 }
 
 // Convert OpenAI stream chunk to Claude format

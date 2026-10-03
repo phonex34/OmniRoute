@@ -2,10 +2,11 @@
  * #12398 — decides whether a Claude-format stream must be aborted with an
  * upstream error at flush time because the client got no usable content.
  *
- * Covers two shapes:
- *  - "partial lifecycle": message_start (and optionally message_delta /
- *    message_stop) arrived but no content block ever did — this was already
- *    correctly handled before #12398 and is preserved here unchanged.
+ * Covers three shapes:
+ *  - "clean empty turn": a real message_stop after end_turn or stop_sequence
+ *    is valid even when the model intentionally emitted no content blocks.
+ *  - "partial lifecycle": lifecycle events arrived but no content block or
+ *    clean completion did.
  *  - "truly empty": the upstream connection closed having sent literally
  *    zero bytes (HTTP 200, not even a message_start). The lifecycle flags
  *    above can never catch this shape since none of them are ever set — the
@@ -21,13 +22,38 @@ type ClaudeEmptyLifecycleLike = {
   hasMessageStart: boolean;
   hasMessageDelta: boolean;
   hasMessageStop: boolean;
+  stopReason?: string | null;
+  reasoningTokens?: number;
 };
+
+/**
+ * Claude SSE clean-stop policy, not a non-streaming or OpenAI exemption.
+ * Codex retains its encrypted-reasoning evidence requirement.
+ */
+export function isCleanEmptyClaudeStop(
+  stopReason: unknown,
+  provider?: string | null,
+  reasoningTokens = 0
+): boolean {
+  return (
+    (stopReason === "end_turn" || stopReason === "stop_sequence") &&
+    (provider !== "codex" || reasoningTokens > 0)
+  );
+}
 
 export function shouldAbortEmptyClaudeStream(
   lifecycle: ClaudeEmptyLifecycleLike,
-  sawAnyUpstreamPayload: boolean
+  sawAnyUpstreamPayload: boolean,
+  provider?: string | null
 ): boolean {
   if (lifecycle.hasError || lifecycle.hasContentBlock) return false;
+  if (
+    sawAnyUpstreamPayload &&
+    lifecycle.hasMessageStop &&
+    isCleanEmptyClaudeStop(lifecycle.stopReason, provider, lifecycle.reasoningTokens)
+  ) {
+    return false;
+  }
   const hasPartialLifecycle =
     lifecycle.hasMessageStart || lifecycle.hasMessageDelta || lifecycle.hasMessageStop;
   return hasPartialLifecycle || !sawAnyUpstreamPayload;

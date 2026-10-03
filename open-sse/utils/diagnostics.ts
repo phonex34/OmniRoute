@@ -10,7 +10,11 @@
  */
 
 import { sanitizeErrorMessage } from "./error.ts";
-import { classifyFakeSuccessBody } from "../services/errorClassifier.ts";
+import {
+  classifyFakeSuccessBody,
+  isTrustedEmptyStop,
+  readUsageReasoningTokens,
+} from "../services/errorClassifier.ts";
 import { SYNTHETIC_RESPONSES_SEQUENCE_NUMBER } from "./responsesSequence.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -371,6 +375,14 @@ export function detectMalformedNonStream(
       return c?.finish_reason === "length";
     });
     if (truncated) return null;
+    // #14160: a trusted first-party provider (codex: with reasoning tokens)
+    // that stopped normally chose to say nothing — a valid empty answer.
+    const reasoningTokens = readUsageReasoningTokens(body.usage);
+    const trustedEmpty = choices.some((choice) => {
+      const c = choice as Record<string, unknown>;
+      return isTrustedEmptyStop(provider, c?.finish_reason, reasoningTokens);
+    });
+    if (trustedEmpty) return null;
     return "empty_choices";
   }
 

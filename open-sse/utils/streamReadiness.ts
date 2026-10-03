@@ -190,6 +190,30 @@ const LEGIT_EMPTY_TERMINAL_REASONS = new Set([
 ]);
 
 const TERMINAL_REASON_PATTERN = /"(?:finish_reason|stop_reason)"\s*:\s*"([^"]+)"/g;
+// Responses streams carry no finish_reason; a `response.completed` event whose
+// top-level `response.status` is "completed" is the format's normal stop.
+// Output items carry their own `status`, so the frame is parsed, not regexed.
+const RESPONSES_COMPLETED_PATTERN = /"type"\s*:\s*"response\.completed"/;
+
+function isCompletedResponsesFrame(frame: string): boolean {
+  if (!RESPONSES_COMPLETED_PATTERN.test(frame)) return false;
+  for (const line of frame.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    try {
+      const parsed: unknown = JSON.parse(trimmed.slice(5).trim());
+      if (isRecord(parsed) && isRecord(parsed.response) && parsed.response.status === "completed") {
+        return true;
+      }
+    } catch {
+      // non-JSON data line
+    }
+  }
+  return false;
+}
+const REASONING_TOKENS_PATTERN = /"reasoning_tokens"\s*:\s*(\d+)/;
+const CLAUDE_CONTENT_BLOCK_PATTERN = /"type"\s*:\s*"content_block_(?:start|delta|stop)"/;
+const CLAUDE_MESSAGE_STOP_PATTERN = /"type"\s*:\s*"message_stop"/;
 
 const SSE_FIELD_LINE = /(?:^|\r?\n)\s*(?:data|event):/;
 
@@ -256,6 +280,18 @@ export type StreamContentWatcher = {
   /** True once a terminal state was seen where emitting no content is valid. */
   sawLegitEmptyTerminal: () => boolean;
   /**
+   * Last terminal stop reason seen (`stop`, `end_turn`, …; `response.completed`
+   * reads as `stop`), or null. Read once the stream is done so a trailing usage
+   * frame after the finish chunk is already counted.
+   */
+  lastStopReason: () => string | null;
+  /** Highest `reasoning_tokens` reported by any usage frame (0 when none). */
+  reasoningTokens: () => number;
+  /** True once a Claude content block event was seen, even if its text stayed empty. */
+  sawClaudeContentBlock: () => boolean;
+  /** True only after a message_stop data payload, not merely an event: header. */
+  sawClaudeMessageStop: () => boolean;
+  /**
    * True once the stream looked like SSE at all. Not every body reaching the
    * client wrapper is event-stream — a plain JSON completion is forwarded
    * through the same path — and a non-SSE body has no `data:` frames to judge,
@@ -290,18 +326,24 @@ export function createStreamContentWatcher(): StreamContentWatcher {
   let legitEmpty = false;
   let sse = false;
   let error = false;
+  let stopReason: string | null = null;
+  let reasoning = 0;
+  let claudeContentBlock = false;
+  let claudeMessageStop = false;
 
   const inspect = (frame: string): void => {
     if (!frame) return;
     if (!sse && SSE_FIELD_LINE.test(frame)) sse = true;
     if (!error && frameHasStructuredStreamError(frame)) error = true;
     if (!content && hasUsefulStreamContent(frame)) content = true;
-    if (legitEmpty) return;
+    if (!claudeContentBlock && CLAUDE_CONTENT_BLOCK_PATTERN.test(frame)) claudeContentBlock = true;
+    if (!claudeMessageStop && CLAUDE_MESSAGE_STOP_PATTERN.test(frame)) claudeMessageStop = true;
+    const reasoningMatch = REASONING_TOKENS_PATTERN.exec(frame);
+    if (reasoningMatch) reasoning = Math.max(reasoning, Number(reasoningMatch[1]));
+    if (isCompletedResponsesFrame(frame)) stopReason = "stop";
     for (const match of frame.matchAll(TERMINAL_REASON_PATTERN)) {
-      if (LEGIT_EMPTY_TERMINAL_REASONS.has(match[1])) {
-        legitEmpty = true;
-        return;
-      }
+      stopReason = match[1];
+      if (LEGIT_EMPTY_TERMINAL_REASONS.has(match[1])) legitEmpty = true;
     }
   };
 
@@ -326,6 +368,10 @@ export function createStreamContentWatcher(): StreamContentWatcher {
     },
     sawContent: () => content,
     sawLegitEmptyTerminal: () => legitEmpty,
+    lastStopReason: () => stopReason,
+    reasoningTokens: () => reasoning,
+    sawClaudeContentBlock: () => claudeContentBlock,
+    sawClaudeMessageStop: () => claudeMessageStop,
     sawSseFrame: () => sse,
     sawError: () => error,
   };
