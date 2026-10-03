@@ -281,7 +281,8 @@ async function evaluatePinnedResponse(args: {
       config.responseValidation,
       preContentTransportRecovery ? signal : null,
       await isTrustedEmptyTurn(parseModel(pinnedModel).provider, pinnedResult),
-      preContentTransportRecovery
+      preContentTransportRecovery,
+      parseModel(pinnedModel).provider
     );
     releaseQualityClone(pinnedClone, pinnedResult, pinnedQuality);
     if (recoveryAborted(preContentTransportRecovery, signal)) {
