@@ -420,7 +420,8 @@ export async function executeTargetAttempt(
             ? deps.signal
             : null,
         await isTrustedEmptyTurn(provider, result, target.connectionId),
-        preContentTransportRecovery
+        preContentTransportRecovery,
+        provider
       );
       releaseQualityClone(qualityClone, result, quality);
       if (preContentTransportRecovery && deps.signal?.aborted) {
