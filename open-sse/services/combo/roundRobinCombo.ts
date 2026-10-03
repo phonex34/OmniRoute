@@ -889,7 +889,8 @@ export async function handleRoundRobinCombo({
               config.responseValidation,
               preContentTransportRecovery ? signal : null,
               await isTrustedEmptyTurn(provider, result, targetForAttempt.connectionId),
-              preContentTransportRecovery
+              preContentTransportRecovery,
+              provider
             );
             releaseQualityClone(rrClone, result, quality);
             if (preContentTransportRecovery && signal?.aborted) {

@@ -404,6 +404,7 @@ export function createStreamController({
       abortController.abort();
       releaseRequestCallbacks();
     },
+    provider,
     clientResponseFormat,
     clientDisconnectGracePeriodMs,
   };
@@ -585,6 +586,7 @@ function resolveSilentCloseOutcome(input: {
   bytesWereForwarded: boolean;
   clientTerminalSeen: boolean;
   clientResponseFormat?: string | null;
+  provider?: string | null;
   contentWatcher: StreamContentWatcher;
   permitsEmptyTurn?: () => boolean;
 }): SilentCloseOutcome | null {
@@ -709,6 +711,7 @@ export function createDisconnectAwareStream(
               bytesWereForwarded,
               clientTerminalSeen,
               clientResponseFormat: streamController.clientResponseFormat,
+              provider: streamController.provider,
               contentWatcher,
               permitsEmptyTurn: options.permitsEmptyTurn,
             });
