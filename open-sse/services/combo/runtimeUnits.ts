@@ -380,7 +380,8 @@ export async function executeRuntimeUnitCombo(args: {
           args.signal,
           unit.kind === "model" &&
             (await isTrustedEmptyTurn(unit.provider, response, unit.connectionId)),
-          preContentTransportRecovery
+          preContentTransportRecovery,
+          unit.kind === "model" ? unit.provider : null
         );
         releaseQualityClone(unitClone, response, quality);
         if (preContentTransportRecovery && args.signal?.aborted) {

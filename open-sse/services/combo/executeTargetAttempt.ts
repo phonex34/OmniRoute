@@ -401,7 +401,8 @@ export async function executeTargetAttempt(
         deps.config.responseValidation as ResponseValidationConfig | null | undefined,
         preContentTransportRecovery ? deps.signal : null,
         await isTrustedEmptyTurn(provider, result, target.connectionId),
-        preContentTransportRecovery
+        preContentTransportRecovery,
+        provider
       );
       releaseQualityClone(qualityClone, result, quality);
       if (preContentTransportRecovery && deps.signal?.aborted) {
