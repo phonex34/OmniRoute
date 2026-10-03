@@ -10,7 +10,11 @@
  */
 
 import { sanitizeErrorMessage } from "./error.ts";
-import { classifyFakeSuccessBody } from "../services/errorClassifier.ts";
+import {
+  classifyFakeSuccessBody,
+  isTrustedEmptyStop,
+  isSuccessfulResponsesCompletion,
+} from "../services/errorClassifier.ts";
 import {
   buildSyntheticResponsesFailureId,
   SYNTHETIC_RESPONSES_SEQUENCE_NUMBER,
@@ -217,14 +221,23 @@ export function detectMalformedNonStream(
             Array.isArray(it.content) &&
             (it.content as unknown[]).some((c) => {
               const part = c as Record<string, unknown>;
-              return typeof part?.text === "string" && (part.text as string).length > 0;
+              return (
+                (typeof part?.text === "string" && part.text.length > 0) ||
+                (part?.type === "refusal" &&
+                  typeof part.refusal === "string" &&
+                  part.refusal.trim().length > 0)
+              );
             })
           );
         }
         // function_call / other structural items count
         return Boolean(it.type);
       });
-    if (!hasOutput) return "empty_choices";
+    if (
+      !hasOutput &&
+      !(isSuccessfulResponsesCompletion(body) && isTrustedEmptyStop(provider, "stop", body.usage))
+    )
+      return "empty_choices";
     const status = typeof body.status === "string" ? body.status : "";
     // OpenAI Responses spec: "incomplete" (budget exhausted — max_output_tokens
     // / max_tool_calls) and "cancelled" are legal terminal states, not a body
@@ -301,12 +314,20 @@ export function detectMalformedNonStream(
     //     body (no stop_reason) must not become empty_choices. A terminal
     //     stop_reason with no output usually is empty_choices — except the
     //     same legitimate empty stops that `isEmptyContentResponse` already
-    //     accepts (`max_tokens`, `tool_use`). Claude Code's `/model` probe
-    //     sends `max_tokens: 1`; Opus can burn that budget on thinking and
-    //     return content:[] + stop_reason max_tokens. Treating that as
-    //     empty_choices turns a valid 200 into MALFORMED-200 → 502 even
-    //     though errorClassifier would have let it through.
+    //     accepts (`max_tokens`, `tool_use`, and native `refusal`). Claude Code's
+    //     `/model` probe sends `max_tokens: 1`; Opus can burn that budget on thinking
+    //     and return content:[] + stop_reason max_tokens. A refusal likewise carries
+    //     its result in the terminal metadata rather than visible text. Rewriting
+    //     either valid 200 into MALFORMED-200 → 502 loses the provider's result.
     const stopReason = typeof body.stop_reason === "string" ? body.stop_reason : "";
+    if (
+      stopReason === "refusal" &&
+      content.length === 0 &&
+      body.role === "assistant" &&
+      !("error" in body)
+    ) {
+      return null;
+    }
     // #12968: the #9971 exemption above only fired when `content` was a
     // completely empty array. A tiny `max_tokens` probe against an
     // Anthropic-compatible shim can instead return content:[{type:"text",
@@ -318,6 +339,7 @@ export function detectMalformedNonStream(
     // truncated-completion case — sentinel content + stop_reason "length".
     if (stopReason === "max_tokens" || stopReason === "tool_use" || stopReason === "length")
       return null;
+    if (content.length === 0 && isTrustedEmptyStop(provider, stopReason, body.usage)) return null;
     // content:[] with no stop_reason at all is non-terminal, not empty (#9971).
     if (content.length === 0 && stopReason.length === 0) return null;
     return "empty_choices";
@@ -331,6 +353,7 @@ export function detectMalformedNonStream(
     const c = choice as Record<string, unknown>;
     const msg = c?.message as Record<string, unknown> | undefined;
     if (typeof msg?.content === "string" && (msg.content as string).length > 0) return true;
+    if (typeof msg?.refusal === "string" && msg.refusal.trim().length > 0) return true;
     // #5559: some OpenAI-compatible upstreams (e.g. Cline via OAuth) return
     // `message.content` as an array of Anthropic-style content blocks rather than
     // a plain string. An array with at least one non-empty text block is real
@@ -375,12 +398,28 @@ export function detectMalformedNonStream(
       return c?.finish_reason === "length";
     });
     if (truncated) return null;
+    // A trusted provider's normal empty stop is valid only when its explicit
+    // provider policy permits it; ordinary empty Codex turns remain failures.
+    const trustedEmpty = choices.some((choice) => {
+      const c = choice as Record<string, unknown>;
+      return isTrustedEmptyStop(provider, c?.finish_reason, body.usage);
+    });
+    if (trustedEmpty) return null;
     return "empty_choices";
   }
 
   // #13461: only for the narrow provider allowlist — see classifyFakeSuccessBody's
   // doc comment for the false-positive guards (short content + dominant signal).
-  if (provider && classifyFakeSuccessBody(extractChatCompletionText(choices), provider)) {
+  const hasRefusal = choices.some((choice) => {
+    const message = (choice as Record<string, unknown>)?.message as
+      Record<string, unknown> | undefined;
+    return typeof message?.refusal === "string" && message.refusal.trim().length > 0;
+  });
+  if (
+    !hasRefusal &&
+    provider &&
+    classifyFakeSuccessBody(extractChatCompletionText(choices), provider)
+  ) {
     return "content_is_upstream_error";
   }
 

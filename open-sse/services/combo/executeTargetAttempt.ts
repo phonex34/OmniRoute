@@ -390,7 +390,8 @@ export async function executeTargetAttempt(opts: {
         deps.log,
         deps.config.responseValidation as ResponseValidationConfig | null | undefined,
         null,
-        await isTrustedEmptyTurn(provider, result, target.connectionId)
+        await isTrustedEmptyTurn(provider, result, target.connectionId),
+        provider
       );
       releaseQualityClone(qualityClone, result, quality);
       if (!quality.valid) {
