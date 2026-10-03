@@ -33,6 +33,10 @@ import {
   computeFinishReason,
   withAssistantRoleOnFirstDelta,
 } from "./openai-responses/synthesizeCompletedToolCalls.ts";
+import {
+  translateResponsesTextEvent,
+  synthesizeCompletedMessageText,
+} from "./openai-responses/responsesTextSnapshots.ts";
 // normalizeUpstreamFailure is re-exported for external importers (tests).
 export { normalizeUpstreamFailure } from "./openai-responses/pureHelpers.ts";
 
@@ -1080,30 +1084,8 @@ function openaiResponsesToOpenAIResponseStream(chunk, state) {
     state.toolCallOutputIndexToCallId = new Map();
   }
 
-  // Text content delta
-  if (eventType === "response.output_text.delta") {
-    const delta = data.delta || "";
-    if (!delta) return null;
-
-    return {
-      id: state.chatId,
-      object: "chat.completion.chunk",
-      created: state.created,
-      model: state.model || "gpt-4",
-      choices: [
-        {
-          index: 0,
-          delta: { content: delta },
-          finish_reason: null,
-        },
-      ],
-    };
-  }
-
-  // Text content done (ignore, we handle via delta)
-  if (eventType === "response.output_text.done") {
-    return null;
-  }
+  const textResult = translateResponsesTextEvent(state, eventType, data);
+  if (textResult !== undefined) return textResult;
 
   // Function call started
   if (eventType === "response.output_item.added" && data.item?.type === "function_call") {
@@ -1463,8 +1445,9 @@ function openaiResponsesToOpenAIResponseStream(chunk, state) {
     // providers that DO stream incrementally and also echo the same
     // function_call items here. See synthesizeCompletedToolCalls's own
     // doc-comment for the full rationale.
+    const recoveredText = synthesizeCompletedMessageText(state, data.response?.output);
     const synthesized = synthesizeCompletedToolCalls(state, data.response?.output);
-    if (synthesized) return synthesized;
+    if (synthesized) return recoveredText.length ? [...recoveredText, ...synthesized] : synthesized;
 
     if (!state.finishReasonSent) {
       state.finishReasonSent = true;
@@ -1490,7 +1473,7 @@ function openaiResponsesToOpenAIResponseStream(chunk, state) {
         finalChunk.usage = state.usage;
       }
 
-      return finalChunk;
+      return recoveredText.length ? [...recoveredText, finalChunk] : finalChunk;
     }
     return null;
   }
