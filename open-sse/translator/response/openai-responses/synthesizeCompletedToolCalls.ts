@@ -24,6 +24,7 @@ import { normalizeToolName, stripEmptyOptionalToolArgs } from "./pureHelpers.ts"
  * state coupling at all.
  */
 export function computeFinishReason(state): "tool_calls" | "stop" | "length" | "content_filter" {
+  if (state.responsesRefusalObserved) return "content_filter";
   if ((state.toolCallIndex || 0) > 0 || state.currentToolCallId) return "tool_calls";
   // #15489: a `response.incomplete` terminal is a truncated turn, not a clean stop.
   if (state.incompleteReason === "max_output_tokens") return "length";
