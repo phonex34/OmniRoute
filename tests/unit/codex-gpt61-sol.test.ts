@@ -149,8 +149,8 @@ test("GPT-6.1 Sol Codex pricing and existing Fast usage multiplier remain distin
     assert.equal(pricing.output, 10, id);
     assert.equal(pricing.reasoning, 10, id);
     assert.equal(pricing.cache_creation, 2.5, id);
-    assert.equal(getCodexFastCostMultiplier("codex", id, "priority"), 2, id);
-    assert.equal(getCodexFastCostMultiplier("cx", id, "fast"), 2, id);
+    assert.equal(getCodexFastCostMultiplier("codex", id, "priority"), 2.5, id);
+    assert.equal(getCodexFastCostMultiplier("cx", id, "fast"), 2.5, id);
     assert.equal(getCodexFastCostMultiplier("codex", id, "default"), 1, id);
   }
 });
