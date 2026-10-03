@@ -236,7 +236,9 @@ async function evaluatePinnedResponse(args: {
       pinnedClone,
       clientRequestedStream,
       log,
-      config.responseValidation
+      config.responseValidation,
+      undefined,
+      parseModel(pinnedModel).provider
     );
     releaseQualityClone(pinnedClone, pinnedResult, pinnedQuality);
     if (pinnedQuality.valid) return pinnedResult;

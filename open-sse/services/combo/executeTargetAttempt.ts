@@ -386,7 +386,9 @@ export async function executeTargetAttempt(opts: {
         qualityClone,
         deps.clientRequestedStream,
         deps.log,
-        deps.config.responseValidation as ResponseValidationConfig | null | undefined
+        deps.config.responseValidation as ResponseValidationConfig | null | undefined,
+        undefined,
+        provider
       );
       releaseQualityClone(qualityClone, result, quality);
       if (!quality.valid) {

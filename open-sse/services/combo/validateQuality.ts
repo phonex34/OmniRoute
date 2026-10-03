@@ -18,6 +18,7 @@ import { evaluateResponseValidation, type ResponseValidationConfig } from "./res
 import { getReasoningTokens } from "../../../src/lib/usage/tokenAccounting.ts";
 import { REASONING_BUFFER_MIN_TRIGGER } from "../reasoningTokenBuffer.ts";
 import type { ComboRetryAfter } from "./types.ts";
+import { isTrustedEmptyStop, readUsageReasoningTokens } from "../errorClassifier.ts";
 
 /**
  * #12659: below this actual `completion_tokens` count, a reasoning-truncated
@@ -168,6 +169,10 @@ function messageDeltaEndsLifecycle(parsed: Record<string, unknown>): boolean {
 interface OpenAiLifecycleFlags {
   hasChoicePayload: boolean;
   hasTerminalMarker: boolean;
+  /** Last non-null `finish_reason` seen (#14160 trusted empty-stop check). */
+  lastFinishReason: string | null;
+  /** Highest `usage` reasoning_tokens seen, incl. trailing usage-only chunks. */
+  reasoningTokens: number;
 }
 
 /** Update `flags` in place from one parsed OpenAI-shape SSE `data:` payload. */
@@ -175,9 +180,15 @@ function applyOpenAiLifecycleEvent(
   parsed: Record<string, unknown>,
   flags: OpenAiLifecycleFlags
 ): void {
+  flags.reasoningTokens = Math.max(flags.reasoningTokens, readUsageReasoningTokens(parsed.usage));
   if (!isOpenAIChoicesPayload(parsed)) return;
   flags.hasChoicePayload = true;
-  if (hasOpenAIFinishReason(parsed)) flags.hasTerminalMarker = true;
+  if (!hasOpenAIFinishReason(parsed)) return;
+  flags.hasTerminalMarker = true;
+  const reason = (parsed.choices as Array<Record<string, unknown> | null>).find(
+    (choice) => typeof choice?.finish_reason === "string"
+  )?.finish_reason;
+  if (typeof reason === "string") flags.lastFinishReason = reason;
 }
 
 /**
@@ -343,7 +354,9 @@ export async function validateResponseQuality(
   isStreaming: boolean,
   log: { warn?: (...args: unknown[]) => void },
   responseValidation?: ResponseValidationConfig | null,
-  signal?: AbortSignal | null
+  signal?: AbortSignal | null,
+  /** Target provider id — enables the #14160 trusted empty-stop exemption. */
+  provider?: string | null
 ): Promise<ResponseQualityResult> {
   // Issue #3685: For Claude SSE streaming responses, use a BOUNDED PEEK to
   // detect the empty-content-block pattern (content_filter stop_reason with
@@ -401,7 +414,12 @@ export async function validateResponseQuality(
       hasLifecycleEnd: false,
     };
     // #7285: OpenAI-shape lifecycle tracking, parallel to `sse` above.
-    const openAi: OpenAiLifecycleFlags = { hasChoicePayload: false, hasTerminalMarker: false };
+    const openAi: OpenAiLifecycleFlags = {
+      hasChoicePayload: false,
+      hasTerminalMarker: false,
+      lastFinishReason: null,
+      reasoningTokens: 0,
+    };
     // User log 1784230812441-bf3789: the previous `!sawAnyBytes` gate below let
     // ANY byte — even unparseable garbage with no SSE framing at all — pass
     // combo failover through. These two flags are tracked in parallel to
@@ -666,6 +684,11 @@ export async function validateResponseQuality(
           // `outcome === "content"` branch above and never reaches here —
           // this branch only fires on genuinely empty completions.
           if (openAi.hasChoicePayload && openAi.hasTerminalMarker) {
+            // #14160: a trusted first-party provider that stopped normally chose
+            // to say nothing (codex: with reasoning tokens) — forward it as-is.
+            if (isTrustedEmptyStop(provider, openAi.lastFinishReason, openAi.reasoningTokens)) {
+              return { valid: true, clonedResponse: buildReplayResponse(reader) };
+            }
             log.warn?.(
               "COMBO",
               "Streaming OpenAI-shape response reached finish_reason/[DONE] with no content, reasoning, or tool_calls — marking as invalid for combo failover"
@@ -904,7 +927,11 @@ export async function validateResponseQuality(
     // same case the Claude shape exempts as stop_reason "max_tokens" (#12968).
     // A thinking model that spends the whole budget before any visible token
     // is a valid response, not a reason to fail the combo target over.
-    if (firstChoice?.finish_reason === "length") {
+    // #14160: a trusted first-party provider's normal empty stop is valid too.
+    if (
+      firstChoice?.finish_reason === "length" ||
+      isTrustedEmptyStop(provider, firstChoice?.finish_reason, readUsageReasoningTokens(json.usage))
+    ) {
       return {
         valid: true,
         clonedResponse: new Response(text, {
