@@ -734,7 +734,9 @@ export async function handleRoundRobinCombo({
               rrClone,
               clientRequestedStream,
               log,
-              config.responseValidation
+              config.responseValidation,
+              undefined,
+              provider
             );
             releaseQualityClone(rrClone, result, quality);
             if (!quality.valid) {
