@@ -23,7 +23,8 @@ import { normalizeToolName, stripEmptyOptionalToolArgs } from "./pureHelpers.ts"
  * guarded (tests/unit/response-openai-responses-purehelpers-split.test.ts) to have NO
  * state coupling at all.
  */
-export function computeFinishReason(state): "tool_calls" | "stop" {
+export function computeFinishReason(state): "tool_calls" | "stop" | "content_filter" {
+  if (state.responsesRefusalObserved) return "content_filter";
   return (state.toolCallIndex || 0) > 0 || state.currentToolCallId ? "tool_calls" : "stop";
 }
 

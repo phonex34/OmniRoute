@@ -6,6 +6,8 @@ import { PENDING_REQUEST_CLEARED_MARKER } from "./stream.ts";
 import { createCompletedResponsesToolHandoffWatcher } from "./responsesToolHandoff.ts";
 import { createStreamContentWatcher, type StreamContentWatcher } from "./streamReadiness.ts";
 import { hasOpenReasoning } from "./emptyTurnRetry.ts";
+import { isTrustedEmptyStop } from "../services/errorClassifier.ts";
+import { isCleanEmptyClaudeStop } from "./streamClaudeEmptyBody.ts";
 
 // Stream handler with disconnect detection - shared for all providers
 
@@ -431,6 +433,7 @@ export function createStreamController({
       cleanupClientAbortListener();
       abortController.abort();
     },
+    provider,
     clientResponseFormat,
     clientDisconnectGracePeriodMs,
   };
@@ -600,6 +603,7 @@ function resolveSilentCloseOutcome(input: {
   bytesWereForwarded: boolean;
   clientTerminalSeen: boolean;
   clientResponseFormat?: string | null;
+  provider?: string | null;
   contentWatcher: StreamContentWatcher;
 }): SilentCloseOutcome | null {
   if (!input.bytesWereForwarded) return null;
@@ -639,6 +643,22 @@ function resolveSilentCloseOutcome(input: {
   const watcher = input.contentWatcher;
   if (watcher.sawError()) return null;
   if (watcher.sawSseFrame() && !watcher.sawContent() && !watcher.sawLegitEmptyTerminal()) {
+    if (
+      input.clientResponseFormat === FORMATS.CLAUDE &&
+      watcher.sawClaudeMessageStop() &&
+      !watcher.sawClaudeContentBlock() &&
+      isCleanEmptyClaudeStop(watcher.lastStopReason(), input.provider, watcher.usage())
+    ) {
+      return null;
+    }
+    // A silent completion still requires the client's real terminal lifecycle.
+    if (
+      input.clientTerminalSeen &&
+      (input.clientResponseFormat !== FORMATS.CLAUDE || watcher.sawClaudeMessageStop()) &&
+      isTrustedEmptyStop(input.provider, watcher.lastStopReason(), watcher.usage())
+    ) {
+      return null;
+    }
     return { kind: "error", reason: "Provider returned empty content" };
   }
 
@@ -746,6 +766,7 @@ export function createDisconnectAwareStream(
               bytesWereForwarded,
               clientTerminalSeen,
               clientResponseFormat: streamController.clientResponseFormat,
+              provider: streamController.provider,
               contentWatcher,
             });
 

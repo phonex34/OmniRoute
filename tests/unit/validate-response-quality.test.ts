@@ -129,6 +129,44 @@ function makeSseResponse(body: string): Response {
   });
 }
 
+test("synthetic empty-stream 502 is request-scoped and not retried as provider outage", async () => {
+  for (const code of [undefined, "empty_response"]) {
+    const verdict = await validateResponseQuality(
+      makeSseResponse(
+        `event: error\ndata: ${JSON.stringify({
+          type: "error",
+          error: {
+            type: "upstream_response_error",
+            code,
+            status: 502,
+            message: "Claude returned an empty response (no content block)",
+          },
+        })}\n\n`
+      ),
+      true,
+      {}
+    );
+    assert.strictEqual(verdict.valid, false);
+    assert.strictEqual(verdict.upstreamFailure?.status, 502);
+    assert.strictEqual(verdict.upstreamFailure?.requestScoped, true);
+    assert.strictEqual(verdict.upstreamFailure?.retryable, false);
+    assert.strictEqual(verdict.upstreamFailure?.code, code ?? "upstream_error");
+  }
+});
+
+test("real provider 502 remains retryable and not request-scoped", async () => {
+  const verdict = await validateResponseQuality(
+    makeSseResponse(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","status":502,"message":"provider bad gateway"}}\n\n'
+    ),
+    true,
+    {}
+  );
+  assert.strictEqual(verdict.valid, false);
+  assert.strictEqual(verdict.upstreamFailure?.requestScoped, false);
+  assert.strictEqual(verdict.upstreamFailure?.retryable, true);
+});
+
 test("streaming incomplete lifecycle: bytes with no terminator and no structured SSE → invalid", async () => {
   // Garbage bytes that look like SSE prefix but never produce a complete
   // `data:` line, no `event:`, no [DONE], no message_stop. This is the
