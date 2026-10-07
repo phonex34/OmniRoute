@@ -1,4 +1,4 @@
-import { inheritEmptyTurnPolicy } from "../../utils/emptyTurnPolicy.ts";
+import { hasTrustedEmptyTurn, inheritEmptyTurnPolicy } from "../../utils/emptyTurnPolicy.ts";
 import { getCodexClientSessionId } from "../../config/codexIdentity.ts";
 import { modelAfterFamilyFallback } from "../../services/modelFamilyFallbackPolicy.ts";
 import {
@@ -742,7 +742,8 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
       requestToolIdentityMap,
       null,
       undefined,
-      pendingRequestOwner ?? pendingRequestId
+      pendingRequestOwner ?? pendingRequestId,
+      () => hasTrustedEmptyTurn(providerResponse)
     );
   } else if (needsTranslation(targetFormat, clientResponseFormat)) {
     // Standard translation for other providers
@@ -778,7 +779,8 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
       // tool-name casing back from any provider (OpenCode `read`, Claude Code `Read`).
       (body as Record<string, unknown> | null | undefined)?.tools ?? null,
       undefined,
-      pendingRequestOwner ?? pendingRequestId
+      pendingRequestOwner ?? pendingRequestId,
+      () => hasTrustedEmptyTurn(providerResponse)
     );
   } else {
     log?.debug?.("STREAM", `Standard passthrough mode`);
