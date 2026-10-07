@@ -32,6 +32,8 @@ export type CostCalculationOptions = {
   provider?: string | null;
   model?: string | null;
   serviceTier?: string | null;
+  /** Inclusive prompt size of each request in an aggregated, same-size group. */
+  pricingInputTokens?: number;
   /**
    * When true, return $0 for flat-rate (subscription / cookie-web) providers
    * instead of the per-token estimate (#5552). Opt-in so only analytics/display
@@ -264,7 +266,16 @@ export function computeCostFromPricing(
   // never a cost basis: pricing them would bill the request a second time.
   if (isCreditMeteredProvider(options.provider)) return 0;
   const inputTokens = tokens.input ?? tokens.prompt_tokens ?? tokens.input_tokens ?? 0;
-  const rates = options.aggregatedTokens ? pricing : applyLongContextTier(pricing, inputTokens);
+  // Long-context tier is selected by the per-request prompt size when the row carries one
+  // (same-size groups pass it via pricingInputTokens), else by the summed input tokens —
+  // except for aggregated sums, which cannot tell requests apart and keep base rates (#19429).
+  const perRequestInputTokens = toNumber(options.pricingInputTokens, 0);
+  const rates =
+    perRequestInputTokens > 0
+      ? applyLongContextTier(pricing, perRequestInputTokens)
+      : options.aggregatedTokens
+        ? pricing
+        : applyLongContextTier(pricing, inputTokens);
   const inputPrice = toNumber(rates.input, 0);
   const cachedPrice = toNumber(rates.cached, inputPrice);
   const outputPrice = toNumber(rates.output, 0);
