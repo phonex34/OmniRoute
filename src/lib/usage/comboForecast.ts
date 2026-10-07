@@ -107,7 +107,12 @@ async function attachCosts(rows: ComboForecastUsageRow[]): Promise<CostedUsageRo
         cacheCreation: row.cacheCreationTokens,
         reasoning: row.reasoningTokens,
       },
-      { provider: row.provider, model: row.model, serviceTier: "standard" }
+      {
+        provider: row.provider,
+        model: row.model,
+        serviceTier: "standard",
+        pricingInputTokens: row.pricingInputTokens,
+      }
     );
     costed.push({ ...row, costUsd, pricingCovered: Boolean(pricing) });
   }

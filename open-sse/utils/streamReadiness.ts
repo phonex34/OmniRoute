@@ -489,7 +489,10 @@ export function createStreamContentWatcher(): StreamContentWatcher {
         // Ignore sentinels and incomplete JSON; they cannot prove generation.
       }
     }
-    if (isCompletedResponsesFrame(frame)) stopReason = "stop";
+    if (isCompletedResponsesFrame(frame)) {
+      normalStop = true;
+      stopReason = "stop";
+    }
     for (const match of frame.matchAll(TERMINAL_REASON_PATTERN)) {
       stopReason = match[2];
       if (LEGIT_EMPTY_TERMINAL_REASONS.has(match[2])) legitEmpty = true;

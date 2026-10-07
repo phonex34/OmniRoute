@@ -4,6 +4,7 @@
  *
  * @changes
  * - [2026-07-24] [Composer] - Aggregate usage_history in SQL instead of loading all rows into JS
+ * - Preserve original prompt sizes when pricing SQL aggregates, then merge public model rows.
  */
 
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
@@ -39,6 +40,7 @@ interface AggregatedUsageCostRow {
   serviceTier: string;
   requests: number;
   promptTokens: number;
+  pricingInputTokens: number;
   completionTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
@@ -369,6 +371,8 @@ function fetchAggregatedUsageRows(filter: UsageHistoryFilter): AggregatedUsageCo
         COALESCE(NULLIF(service_tier, ''), 'standard') as serviceTier,
         COUNT(*) as requests,
         COALESCE(SUM(tokens_input), 0) as promptTokens,
+        -- Inclusive per-request prompt size, not the aggregate prompt total.
+        COALESCE(tokens_input, 0) as pricingInputTokens,
         COALESCE(SUM(tokens_output), 0) as completionTokens,
         COALESCE(SUM(tokens_cache_read), 0) as cacheReadTokens,
         COALESCE(SUM(tokens_cache_creation), 0) as cacheCreationTokens,
@@ -382,7 +386,8 @@ function fetchAggregatedUsageRows(filter: UsageHistoryFilter): AggregatedUsageCo
         COALESCE(NULLIF(api_key_name, ''), ''),
         LOWER(provider),
         LOWER(model),
-        COALESCE(NULLIF(service_tier, ''), 'standard')
+        COALESCE(NULLIF(service_tier, ''), 'standard'),
+        COALESCE(tokens_input, 0)
       ORDER BY totalTokens DESC
       `
     )
@@ -579,7 +584,7 @@ async function getAggregatedGroupCostUsd(row: AggregatedUsageCostRow): Promise<n
         cacheCreation: toNumber(row.cacheCreationTokens),
         reasoning: toNumber(row.reasoningTokens),
       },
-      { serviceTier: row.serviceTier }
+      { serviceTier: row.serviceTier, pricingInputTokens: toNumber(row.pricingInputTokens) }
     )
   );
 }
