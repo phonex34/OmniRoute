@@ -33,6 +33,8 @@ export type FetchedLimitsCache = {
   connectionId: string;
   cache: ProviderLimitsCacheEntry;
   codexFence?: CodexConnectionFence | null;
+  /** Raw fetch was error-only (no quotas + message); merge may hide that. */
+  failed?: boolean;
 };
 export type PendingLimitsCacheEntry = {
   connectionId: string;
