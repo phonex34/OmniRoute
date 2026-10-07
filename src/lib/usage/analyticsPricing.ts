@@ -233,6 +233,7 @@ export function computeUsageRowCost(
   );
   if (!pricing) return rawStoredCost;
 
+  const pricingInputTokens = toNumber(row.pricingInputTokens);
   return (
     rawStoredCost +
     computeCostFromPricing(pricing, getPriceableTokens(row), {
@@ -240,6 +241,10 @@ export function computeUsageRowCost(
       model,
       serviceTier,
       flatRateAsZero,
+      // Aggregated same-size groups must select the long-context tier from the
+      // per-request prompt size, not the summed one (mirrors budget pricing).
+      // Zero means "unknown" (legacy rollups) — keep the summed-input fallback.
+      ...(pricingInputTokens > 0 ? { pricingInputTokens } : {}),
     })
   );
 }

@@ -103,6 +103,7 @@ interface UsageCostRow {
   model: string | null;
   serviceTier: string | null;
   promptTokens: number | null;
+  pricingInputTokens: number | null;
   completionTokens: number | null;
   cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
@@ -534,6 +535,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
         LOWER(provider) as provider,
         LOWER(model) as model,
         COALESCE(NULLIF(service_tier, ''), 'standard') as serviceTier,
+        COALESCE(tokens_input, 0) as pricingInputTokens,
         COALESCE(SUM(provider_cost_usd), 0) as storedCost,
         COALESCE(SUM(CASE WHEN provider_cost_usd IS NULL THEN 1 ELSE 0 END), 0) as unmeteredRequests,
         COALESCE(SUM(CASE WHEN provider_cost_usd IS NULL THEN tokens_input ELSE 0 END), 0) as promptTokens,
@@ -546,7 +548,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
       WHERE api_key_id = @apiKeyId
         AND timestamp >= @sinceIso
         AND (success = 1 OR provider_cost_usd IS NOT NULL)
-      GROUP BY LOWER(provider), LOWER(model), serviceTier
+      GROUP BY LOWER(provider), LOWER(model), serviceTier, COALESCE(tokens_input, 0)
     `
     )
     .all({ apiKeyId, sinceIso }) as UsageCostRow[];
@@ -579,6 +581,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
         provider,
         model,
         serviceTier: row.serviceTier || "standard",
+        pricingInputTokens: toNumber(row.pricingInputTokens),
       }
     );
     if (failed) {
@@ -959,6 +962,7 @@ export function buildApiKeyUsageLimitRejection(
   const message = sanitizeErrorMessage(
     unpricedMessage ?? buildUsageLimitExceededMessage(status, now, options)
   );
+  const hasUnpricedUsage = unpricedMessage !== null;
   // A reset is only actionable if that single priced window caused the
   // rejection. Another blocked window (or missing pricing) may outlive it.
   const severalWindowsBlocked = usageWindowViews(status).filter((w) => w.exceeded).length > 1;
@@ -978,6 +982,7 @@ export function buildApiKeyUsageLimitRejection(
         error: {
           type: "invalid_request_error",
           message,
+          ...(hasUnpricedUsage ? { reason: "missing_pricing" } : {}),
           ...resolved,
         },
       }),
@@ -1000,6 +1005,7 @@ export function buildApiKeyUsageLimitRejection(
   // Priced quota overages retain the current 429 + reset timing contract.
   return errorResponse(429, message, {
     code: "usage_limit_exceeded",
+    reason: hasUnpricedUsage ? "missing_pricing" : undefined,
     retryAfter: trippedResetAtIso,
   });
 }

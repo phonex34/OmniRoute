@@ -33,7 +33,6 @@ import { toNumber as toFiniteNumber } from "../utils/numeric.ts";
 import { geminiExtraUsageCounts } from "../translator/response/geminiUsageMetadata.ts";
 import {
   isSuccessfulResponsesCompletion,
-  readUsageOutputTokens,
   readUsageReasoningTokens,
 } from "../services/errorClassifier.ts";
 import { isEstimatedUsage } from "../utils/usageTracking.ts";
@@ -118,7 +117,11 @@ function extractMessageOutputText(item: JsonRecord, refusal = false): string {
     if (!part || typeof part !== "object") continue;
     const partObj = toRecord(part);
     const value = refusal ? partObj.refusal : partObj.text;
-    if (partObj.type === (refusal ? "refusal" : "output_text") && typeof value === "string") {
+    if (
+      partObj.type === (refusal ? "refusal" : "output_text") &&
+      typeof value === "string" &&
+      (!refusal || value.trim().length > 0)
+    ) {
       text += value;
     }
   }
@@ -786,7 +789,8 @@ export function translateNonStreamingResponse(
       toolNameMap ?? null,
       requestedThinking,
       toolSchemas,
-      clientTools
+      clientTools,
+      targetFormat === FORMATS.OPENAI_RESPONSES
     );
   }
 
@@ -964,7 +968,11 @@ function convertOpenAINonStreamingToClaude(
   toolNameMap?: Map<string, string> | null,
   requestedThinking?: boolean,
   toolSchemas?: Map<string, JsonRecord> | null,
-  clientTools?: unknown
+  clientTools?: unknown,
+  // Responses normalization writes `content: ""` for a silent turn; only that
+  // projection may stay empty. A native OpenAI empty string keeps the
+  // placeholder (#15764).
+  fromResponsesUpstream = false
 ): JsonRecord {
   const choices = openaiResponse.choices as unknown[] | undefined;
   const isChoicesArray = Array.isArray(choices);
@@ -977,13 +985,9 @@ function convertOpenAINonStreamingToClaude(
   const messageObj = choiceObj.message ? toRecord(choiceObj.message) : {};
 
   const usageSrc = toRecord(openaiResponse.usage);
-  // This converter has no provider identity: preserve structurally silent
-  // successful turns with reported generation; provider trust is checked by
-  // the caller, not manufactured by a text placeholder here.
-  const preserveSilentContent =
-    choiceObj.finish_reason === "stop" &&
-    !isEstimatedUsage(usageSrc) &&
-    (readUsageOutputTokens(usageSrc) > 0 || readUsageReasoningTokens(usageSrc) > 0);
+  // Preserve empty Responses output as empty so the caller's quality guard can
+  // reject it. Usage counters alone must not manufacture a successful answer.
+  const preserveSilentContent = fromResponsesUpstream;
   const content: JsonRecord[] = [];
 
   let hasTextOrReasoning = false;
@@ -1010,7 +1014,7 @@ function convertOpenAINonStreamingToClaude(
     });
   }
 
-  // Retain the generic empty-response guard unless generation proves a silent stop.
+  // Native chat retains its historical empty-response projection.
   const hasToolCalls = Array.isArray(messageObj.tool_calls) && messageObj.tool_calls.length > 0;
 
   if (refusalText) {
@@ -1020,9 +1024,8 @@ function convertOpenAINonStreamingToClaude(
     }
     content.push({ type: "text", text: refusalText });
   } else if (
-    messageObj.content !== undefined &&
-    messageObj.content !== null &&
-    !(preserveSilentContent && messageObj.content === "")
+    messageObj.content != null &&
+    !(fromResponsesUpstream && preserveSilentContent && messageObj.content === "")
   ) {
     hasTextOrReasoning = true;
     const resolvedText = toString(messageObj.content);
