@@ -108,7 +108,11 @@ function extractMessageOutputText(item: JsonRecord, refusal = false): string {
     if (!part || typeof part !== "object") continue;
     const partObj = toRecord(part);
     const value = refusal ? partObj.refusal : partObj.text;
-    if (partObj.type === (refusal ? "refusal" : "output_text") && typeof value === "string") {
+    if (
+      partObj.type === (refusal ? "refusal" : "output_text") &&
+      typeof value === "string" &&
+      (!refusal || value.trim().length > 0)
+    ) {
       text += value;
     }
   }
@@ -208,21 +212,6 @@ export function translateNonStreamingResponse(
 
     const messageSelection = findBestMessageText(output);
     let textContent = messageSelection.text;
-    let refusal = "";
-    for (const item of output) {
-      const itemObj = toRecord(item);
-      if (itemObj.type !== "message" || !Array.isArray(itemObj.content)) continue;
-      for (const part of itemObj.content) {
-        const partObj = toRecord(part);
-        if (
-          partObj.type === "refusal" &&
-          typeof partObj.refusal === "string" &&
-          partObj.refusal.trim().length > 0
-        ) {
-          refusal += partObj.refusal;
-        }
-      }
-    }
     let replayableReasoningContent = "";
     let reasoningSummary = "";
     const toolCalls: JsonRecord[] = [];
@@ -299,7 +288,6 @@ export function translateNonStreamingResponse(
     if (textContent) {
       message.content = textContent;
     }
-    if (refusal) message.refusal = refusal;
     if (replayableReasoningContent) {
       message.reasoning_content = replayableReasoningContent;
     }
@@ -763,7 +751,8 @@ export function translateNonStreamingResponse(
     return convertOpenAINonStreamingToClaude(
       toRecord(intermediateOpenAI),
       toolNameMap ?? null,
-      requestedThinking
+      requestedThinking,
+      targetFormat === FORMATS.OPENAI_RESPONSES
     );
   }
 
@@ -901,7 +890,11 @@ function resolveReasoningText(messageObj: JsonRecord): string {
 function convertOpenAINonStreamingToClaude(
   openaiResponse: JsonRecord,
   toolNameMap?: Map<string, string> | null,
-  requestedThinking?: boolean
+  requestedThinking?: boolean,
+  // Responses normalization writes `content: ""` for a silent turn; only that
+  // projection may stay empty. A native OpenAI empty string keeps the
+  // placeholder (#15764).
+  fromResponsesUpstream = false
 ): JsonRecord {
   const choices = openaiResponse.choices as unknown[] | undefined;
   const isChoicesArray = Array.isArray(choices);
@@ -957,9 +950,8 @@ function convertOpenAINonStreamingToClaude(
     }
     content.push({ type: "text", text: refusalText });
   } else if (
-    messageObj.content !== undefined &&
-    messageObj.content !== null &&
-    !(preserveSilentContent && messageObj.content === "")
+    messageObj.content != null &&
+    !(fromResponsesUpstream && preserveSilentContent && messageObj.content === "")
   ) {
     hasTextOrReasoning = true;
     const resolvedText = toString(messageObj.content);

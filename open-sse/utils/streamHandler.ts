@@ -645,8 +645,13 @@ function resolveSilentCloseOutcome(input: {
   if (watcher.sawError()) return null;
   if (watcher.sawSseFrame() && !watcher.sawContent() && !watcher.sawLegitEmptyTerminal()) {
     // A translated/client stop is insufficient: the executed native protocol
-    // must also have supplied an ordinary terminal on a trusted origin.
-    if (!(input.clientTerminalSeen && input.permitsEmptyTurn?.())) {
+    // must also have supplied an ordinary terminal on a trusted origin, and
+    // the client lifecycle must be a clean normal stop (not a spoofed marker).
+    const cleanClientStop =
+      watcher.sawNormalStopTerminal() &&
+      (input.clientResponseFormat !== FORMATS.CLAUDE ||
+        (watcher.sawClaudeMessageStop() && !watcher.sawClaudeContentBlock()));
+    if (!(input.clientTerminalSeen && cleanClientStop && input.permitsEmptyTurn?.())) {
       return { kind: "error", reason: "Provider returned empty content" };
     }
   }
@@ -804,7 +809,7 @@ export function createDisconnectAwareStream(
           noteClientChunk(value);
         } catch (error) {
           if (!streamController.isConnected()) {
-            reader.cancel(new Error("Downstream disconnected")).catch(() => { });
+            reader.cancel(new Error("Downstream disconnected")).catch(() => {});
             try {
               controller.close();
             } catch {
@@ -815,7 +820,7 @@ export function createDisconnectAwareStream(
 
           if (clientTerminalSeen) {
             streamController.handleComplete();
-            reader.cancel(new Error("Client terminal seen")).catch(() => { });
+            reader.cancel(new Error("Client terminal seen")).catch(() => {});
             try {
               controller.close();
             } catch {

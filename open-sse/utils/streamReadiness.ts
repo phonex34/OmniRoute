@@ -65,6 +65,10 @@ function hasUsefulValue(value: unknown): boolean {
   if (hasNonEmptyString(value)) return true;
   if (Array.isArray(value)) return value.some(hasUsefulValue);
   if (!isRecord(value)) return false;
+  if (value.type === "response.refusal.delta" || value.type === "response.refusal.done") {
+    const refusal = value.delta ?? value.refusal;
+    return typeof refusal === "string" && refusal.trim().length > 0;
+  }
 
   // A Responses compaction item IS the turn's output: remote compaction
   // completes with output = [{type:"compaction", encrypted_content}] and no
@@ -489,7 +493,10 @@ export function createStreamContentWatcher(): StreamContentWatcher {
         // Ignore sentinels and incomplete JSON; they cannot prove generation.
       }
     }
-    if (isCompletedResponsesFrame(frame)) stopReason = "stop";
+    if (isCompletedResponsesFrame(frame)) {
+      normalStop = true;
+      stopReason = "stop";
+    }
     for (const match of frame.matchAll(TERMINAL_REASON_PATTERN)) {
       stopReason = match[2];
       if (LEGIT_EMPTY_TERMINAL_REASONS.has(match[2])) legitEmpty = true;

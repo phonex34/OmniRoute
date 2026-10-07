@@ -275,7 +275,7 @@ function hasOpenAICompatibleStreamValue(parsed: Record<string, unknown>): boolea
     const delta = isRecord(choice.delta) ? choice.delta : null;
     if (!delta) return false;
     if (typeof delta.content === "string" && delta.content.length > 0) return true;
-    if (typeof delta.refusal === "string" && delta.refusal.length > 0) return true;
+    if (typeof delta.refusal === "string" && delta.refusal.trim().length > 0) return true;
     if (hasAnyReasoningSignal(delta)) return true;
     return Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0;
   });

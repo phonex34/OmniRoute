@@ -201,6 +201,8 @@ type StreamOptions = {
    */
   streamBufferBytes?: number;
   provider?: string | null;
+  /** Rechecked after raw upstream bytes establish authenticated native completion. */
+  trustedEmptyTurn?: () => boolean;
   reqLogger?: StreamLogger | null;
   toolNameMap?: unknown;
   model?: string | null;
@@ -768,6 +770,7 @@ export function createSSEStream(options: StreamOptions = {}) {
     // no-intent case the same way.
     requestedThinking,
     provider = null,
+    trustedEmptyTurn = () => false,
     reqLogger = null,
     toolNameMap = null,
     model = null,
@@ -1017,6 +1020,9 @@ export function createSSEStream(options: StreamOptions = {}) {
   let successfulResponsesCompletion = false;
   let translatedGenerationUsage: unknown;
   let translatedClientHasOutput = false;
+  const permitsNativeEmptyStop = (reason: unknown) =>
+    (reason === "stop" || reason === "end_turn" || reason === "stop_sequence") &&
+    trustedEmptyTurn();
   const noteTranslatedTerminal = (payload: JsonRecord) => {
     const response = asRecord(payload.response);
     const reportedUsage = payload.usage ?? response.usage;
@@ -1032,11 +1038,12 @@ export function createSSEStream(options: StreamOptions = {}) {
     clientExpectsClaudeStream &&
     !(
       claudeEmptyResponseLifecycle.hasMessageStop &&
-      isTrustedEmptyStop(
-        provider,
-        claudeEmptyResponseLifecycle.stopReason,
-        claudeEmptyResponseLifecycle.usage
-      )
+      (permitsNativeEmptyStop(claudeEmptyResponseLifecycle.stopReason) ||
+        isTrustedEmptyStop(
+          provider,
+          claudeEmptyResponseLifecycle.stopReason,
+          claudeEmptyResponseLifecycle.usage
+        ))
     ) &&
     shouldAbortEmptyClaudeStream(
       claudeEmptyResponseLifecycle,
@@ -1288,7 +1295,10 @@ export function createSSEStream(options: StreamOptions = {}) {
       !state.accumulatedReasoning &&
       !translatedClientHasOutput &&
       (!successfulResponsesCompletion ||
-        !isTrustedEmptyStop(provider, state.finishReason, translatedGenerationUsage))
+        !(
+          permitsNativeEmptyStop(state.finishReason) ||
+          isTrustedEmptyStop(provider, state.finishReason, translatedGenerationUsage)
+        ))
     ) {
       emitTranslatedFailureAndAbort(controller, {
         error: { code: "empty_response", message: "Provider returned empty content" },
@@ -1307,7 +1317,10 @@ export function createSSEStream(options: StreamOptions = {}) {
       const stopReason = state?.finishReason;
       if (
         (targetFormat === FORMATS.OPENAI_RESPONSES && !successfulResponsesCompletion) ||
-        !isTrustedEmptyStop(provider, stopReason, translatedGenerationUsage)
+        !(
+          permitsNativeEmptyStop(stopReason) ||
+          isTrustedEmptyStop(provider, stopReason, translatedGenerationUsage)
+        )
       ) {
         emitClaudeEmptyStreamErrorAndAbort(controller);
         return;
@@ -3360,7 +3373,8 @@ export function createSSETransformStreamWithLogger(
   requestedThinking: boolean | undefined = undefined,
   customToolNames: ReadonlySet<string> = new Set(),
   requestToolIdentityMap: Map<string, { namespace: string; name: string }> | null = null,
-  streamBufferBytes: number = DEFAULT_STREAM_BUFFER_BYTES
+  streamBufferBytes: number = DEFAULT_STREAM_BUFFER_BYTES,
+  trustedEmptyTurn?: () => boolean
 ) {
   return createSSEStream({
     mode: STREAM_MODE.TRANSLATE,
@@ -3381,6 +3395,7 @@ export function createSSETransformStreamWithLogger(
     customToolNames,
     requestToolIdentityMap,
     streamBufferBytes,
+    trustedEmptyTurn,
   });
 }
 
