@@ -236,6 +236,21 @@ export const DEFAULT_PRICING_FRONTIER = {
     "claude-opus-5": CLAUDE_OPUS_5_PRICING,
     "claude-sonnet-5": CLAUDE_SONNET_5_PRICING,
     "claude-sonnet-5-5": CLAUDE_SONNET_5_PRICING,
+    // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-08).
+    // Tier is selected by total prompt length, including cached input.
+    "claude-haiku-5-5": {
+      input: 0.1,
+      output: 0.5,
+      cached: 0.01,
+      cache_creation: 0.125,
+      long_context: {
+        threshold: 100_000,
+        input: 0.5,
+        output: 2.5,
+        cached: 0.05,
+        cache_creation: 0.625,
+      },
+    },
     "claude-opus-4.8": CLAUDE_OPUS_4_PRICING,
     "claude-opus-4-8": CLAUDE_OPUS_4_PRICING,
     "claude-opus-4-7": CLAUDE_OPUS_4_PRICING,

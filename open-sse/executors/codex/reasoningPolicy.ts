@@ -102,11 +102,16 @@ function fallbackEffort(
   reasoning: RecordValue,
   metadata: RecordValue,
   connectionDefault: string | undefined,
-  allowDefaults: boolean
+  allowDefaults: boolean,
+  model: string
 ): string | undefined {
   if (reasoning.enabled === false) return "none";
   if (!allowDefaults) return undefined;
-  return connectionDefault || effort(metadata.defaultThinkingEffort) || "medium";
+  return (
+    connectionDefault ||
+    effort(metadata.defaultThinkingEffort) ||
+    (model === "gpt-6.1-sol" ? "low" : "medium")
+  );
 }
 
 /**
@@ -146,7 +151,7 @@ function selectCodexReasoning(
     effort(forcedEffort) ||
     split.effort ||
     requested ||
-    fallbackEffort(reasoning, metadata, connectionDefault, allowDefaults);
+    fallbackEffort(reasoning, metadata, connectionDefault, allowDefaults, split.baseModel);
   if (!selected) return;
   // New catalog values pass through verbatim, including upstream validation errors.
   // Only the old built-in Ultra aliases retain their historical Max wire mapping.

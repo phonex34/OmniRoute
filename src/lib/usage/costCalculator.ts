@@ -28,6 +28,8 @@ export type CostCalculationOptions = {
   provider?: string | null;
   model?: string | null;
   serviceTier?: string | null;
+  /** Inclusive prompt size of each request in an aggregated, same-size group. */
+  pricingInputTokens?: number;
   /**
    * When true, return $0 for flat-rate (subscription / cookie-web) providers
    * instead of the per-token estimate (#5552). Opt-in so only analytics/display
@@ -149,17 +151,24 @@ export function computeCostFromPricing(
   // per-token pricing rows exist only for estimation, so display surfaces opt in
   // to show $0 instead of an inflated estimate (#5552).
   if (options.flatRateAsZero && isFlatRateProvider(options.provider)) return 0;
-  const inputPrice = toNumber(pricing.input, 0);
-  const cachedPrice = toNumber(pricing.cached, inputPrice);
-  const outputPrice = toNumber(pricing.output, 0);
-  const reasoningPrice = toNumber(pricing.reasoning, outputPrice);
-  const cacheCreationPrice = toNumber(pricing.cache_creation, inputPrice);
-
-  let cost = 0;
   const inputTokens = tokens.input ?? tokens.prompt_tokens ?? tokens.input_tokens ?? 0;
   const cachedTokens =
     tokens.cacheRead ?? tokens.cached_tokens ?? tokens.cache_read_input_tokens ?? 0;
   const cacheCreationTokens = tokens.cacheCreation ?? tokens.cache_creation_input_tokens ?? 0;
+  let effectivePricing = pricing;
+  const longContext = pricing.long_context;
+  if (longContext && typeof longContext === "object" && !Array.isArray(longContext)) {
+    const tier = longContext as Record<string, unknown>;
+    const threshold = toNumber(tier.threshold, Number.POSITIVE_INFINITY);
+    if ((options.pricingInputTokens ?? inputTokens) > threshold) effectivePricing = tier;
+  }
+  const inputPrice = toNumber(effectivePricing.input, toNumber(pricing.input, 0));
+  const cachedPrice = toNumber(effectivePricing.cached, inputPrice);
+  const outputPrice = toNumber(effectivePricing.output, toNumber(pricing.output, 0));
+  const reasoningPrice = toNumber(effectivePricing.reasoning, outputPrice);
+  const cacheCreationPrice = toNumber(effectivePricing.cache_creation, inputPrice);
+
+  let cost = 0;
 
   // prompt_tokens from extractors already includes cache_read + cache_creation,
   // so we must subtract BOTH cache types to avoid pricing cache at the full
@@ -178,7 +187,11 @@ export function computeCostFromPricing(
     // Reasoning exceeding completion is impossible when completion is inclusive,
     // so the provider reports separate buckets (#15496): bill reasoning on top.
     cost += reasoningTokens * (reasoningPrice / 1_000_000);
-  } else if (reasoningTokens > 0 && pricing.reasoning !== undefined && pricing.reasoning !== null) {
+  } else if (
+    reasoningTokens > 0 &&
+    effectivePricing.reasoning !== undefined &&
+    effectivePricing.reasoning !== null
+  ) {
     cost += reasoningTokens * ((reasoningPrice - outputPrice) / 1_000_000);
   }
   cost = Math.max(0, cost);

@@ -61,7 +61,7 @@ import { hasCodexSsePeekProgress } from "./codex/ssePeekProgress.ts";
 import { normalizeCodexResponsesInput } from "../utils/responsesInputNormalization.ts";
 import { generateToolCallId } from "../translator/helpers/toolCallHelper.ts";
 import * as prl from "../utils/providerRequestLogging.ts";
-import { createRequire } from "module";
+import * as nodeModule from "node:module";
 import { loadDynamicModule } from "./codex/wreqLoader.ts";
 // Quota parsing/scheduling extracted to a pure leaf; re-exported for the
 // Codex account module and tests.
@@ -90,7 +90,8 @@ export { isCodexFreePlan, normalizeCodexTools } from "./codex/tools.ts";
 // Loading it eagerly crashes the server when the binary is missing (pnpm, Docker
 // Alpine, unsupported architectures). We lazy-load with try/catch to gracefully
 // fall back to HTTP transport when the WebSocket transport is unavailable.
-const _wreqRequire = createRequire(import.meta.url);
+// Resolve from the deployed entrypoint, not a build-time import.meta.url path.
+const _wreqRequire = nodeModule.createRequire(process.argv[1] || process.cwd());
 
 type WreqWebSocket = {
   send: (data: string) => void;
@@ -1732,8 +1733,6 @@ export class CodexExecutor extends BaseExecutor {
     normalizeCodexResponsesInput(body);
 
     sanitizeCodexResponsesInput(body, nativeCodexPassthrough);
-    stripOrphanedCodexFunctionCallOutputs(body);
-    repairMissingCodexToolCallOutputs(body);
 
     applyCodexReasoningSelection(
       model,
@@ -1836,14 +1835,20 @@ export class CodexExecutor extends BaseExecutor {
         setCodexReplayRecoveryContext(bodyInput, { replayEnabled: true, provenance });
       }
     }
+    // Cleanup/repair must follow replay planning: stripping outputs loses anchors,
+    // while synthesizing outputs beforehand makes detached turns look eligible.
     stripOrphanedCodexFunctionCallOutputs(body);
     repairMissingCodexToolCallOutputs(body);
+    // Preserve the translated empty-input continuation fallback after orphan
+    // outputs are removed; replay must see the caller's real output anchors first.
+    if (!nativeCodexPassthrough && Array.isArray(body.input) && body.input.length === 0) {
+      stripStoredItemReferences(body);
+    }
 
     // Issue #806: Even for native passthrough, some clients (purist completions) might indiscriminately inject
     // a `messages` or `prompt` array which the strict Codex Responses schema rejects.
     delete body.messages;
     delete body.prompt;
-
 
     ensureCodexReasoningSummary(body);
     if (isCompactRequest) {

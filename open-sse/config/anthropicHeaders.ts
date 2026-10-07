@@ -34,8 +34,10 @@ const ANTHROPIC_BETA_BASE = Object.freeze([
 const CLAUDE_OAUTH_EXTRA_BETAS = Object.freeze(["fine-grained-tool-streaming-2025-05-14"]);
 
 export const ANTHROPIC_BETA_FULL = ANTHROPIC_BETA_BASE.join(",");
+// Console API requests must not identify as interactive Claude Code or OAuth:
+// monthly API credits cover Messages API, but not interactive Claude Code.
 export const ANTHROPIC_BETA_API_KEY = ANTHROPIC_BETA_BASE.filter(
-  (beta) => beta !== "oauth-2025-04-20"
+  (beta) => beta !== "oauth-2025-04-20" && beta !== "claude-code-20250219"
 ).join(",");
 export const ANTHROPIC_BETA_CLAUDE_OAUTH = [
   ...ANTHROPIC_BETA_BASE.slice(0, 3),
