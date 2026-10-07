@@ -8,6 +8,8 @@ interface UsageCostRow {
   model: string | null;
   serviceTier: string | null;
   promptTokens: number | null;
+  /** Inclusive prompt size of each request in a same-size group. */
+  pricingInputTokens: number | null;
   completionTokens: number | null;
   cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
@@ -25,6 +27,7 @@ export function getApiKeySpendRows(apiKeyId: string, sinceIso: string): UsageCos
         LOWER(provider) as provider,
         LOWER(model) as model,
         COALESCE(NULLIF(service_tier, ''), 'standard') as serviceTier,
+        COALESCE(tokens_input, 0) as pricingInputTokens,
         COALESCE(SUM(COALESCE(provider_cost_usd, calculated_cost_usd)), 0) as storedCost,
         SUM(CASE WHEN billing_unit IS NOT NULL AND COALESCE(provider_cost_usd, calculated_cost_usd) IS NULL THEN 1 ELSE 0 END) as unpricedUnitRequests,
         COALESCE(SUM(CASE WHEN COALESCE(provider_cost_usd, calculated_cost_usd) IS NULL THEN 1 ELSE 0 END), 0) as unmeteredRequests,
@@ -38,7 +41,8 @@ export function getApiKeySpendRows(apiKeyId: string, sinceIso: string): UsageCos
       WHERE api_key_id = @apiKeyId
         AND timestamp >= @sinceIso
         AND (success = 1 OR COALESCE(provider_cost_usd, calculated_cost_usd) IS NOT NULL)
-      GROUP BY LOWER(provider), LOWER(model), serviceTier
+      -- Per-request prompt size keeps the long-context tier honest for same-size groups.
+      GROUP BY LOWER(provider), LOWER(model), serviceTier, COALESCE(tokens_input, 0)
     `
     )
     .all({ apiKeyId, sinceIso }) as UsageCostRow[];

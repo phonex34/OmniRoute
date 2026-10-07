@@ -544,6 +544,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
         provider,
         model,
         serviceTier: row.serviceTier || "standard",
+        pricingInputTokens: toNumber(row.pricingInputTokens),
       }
     );
     if (failed) {
@@ -924,6 +925,7 @@ export function buildApiKeyUsageLimitRejection(
   const message = sanitizeErrorMessage(
     unpricedMessage ?? buildUsageLimitExceededMessage(status, now, options)
   );
+  const hasUnpricedUsage = unpricedMessage !== null;
   // A reset is only actionable if that single priced window caused the
   // rejection. Another blocked window (or missing pricing) may outlive it.
   const severalWindowsBlocked = usageWindowViews(status).filter((w) => w.exceeded).length > 1;
@@ -943,6 +945,7 @@ export function buildApiKeyUsageLimitRejection(
         error: {
           type: "invalid_request_error",
           message,
+          ...(hasUnpricedUsage ? { reason: "missing_pricing" } : {}),
           ...resolved,
         },
       }),
@@ -965,6 +968,7 @@ export function buildApiKeyUsageLimitRejection(
   // Priced quota overages retain the current 429 + reset timing contract.
   return errorResponse(429, message, {
     code: "usage_limit_exceeded",
+    reason: hasUnpricedUsage ? "missing_pricing" : undefined,
     retryAfter: trippedResetAtIso,
   });
 }
