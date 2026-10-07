@@ -52,8 +52,8 @@ test.describe("SSE stream buffer budget", () => {
   // The defect this pins: glm.ts passes its buffer budget as the LAST positional
   // argument, and the signature once stopped one short — a type error, and the
   // value was dropped, so the 64 KB that call site asks for never reached the
-  // queue. The budget is now the 18th positional (requestToolIdentityMap sits at
-  // 16, #8151; clientTools at 17, #17119); these are the exact arguments
+  // queue. The budget is now the 19th positional (requestToolIdentityMap sits at
+  // 16, #8151; clientTools at 17, #17119; trustedEmptyTurn at 18); these are the exact arguments
   // open-sse/executors/glm.ts passes.
   test("the convenience wrapper carries the trailing positional budget through", () => {
     const transform = createSSETransformStreamWithLogger(
@@ -74,6 +74,7 @@ test.describe("SSE stream buffer budget", () => {
       undefined,
       undefined,
       null,
+      undefined,
       65536
     );
 

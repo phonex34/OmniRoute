@@ -1,4 +1,4 @@
-import { inheritEmptyTurnPolicy } from "../../utils/emptyTurnPolicy.ts";
+import { hasTrustedEmptyTurn, inheritEmptyTurnPolicy } from "../../utils/emptyTurnPolicy.ts";
 import { getCodexClientSessionId } from "../../config/codexIdentity.ts";
 import { modelAfterFamilyFallback } from "../../services/modelFamilyFallbackPolicy.ts";
 import {
@@ -703,7 +703,9 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
       // openai-responses → openai translation still wants the namespace identity
       // map for #7936-style round-trip closure when the client also speaks
       // Responses (Codex CLI).
-      requestToolIdentityMap
+      requestToolIdentityMap,
+      null,
+      () => hasTrustedEmptyTurn(providerResponse)
     );
   } else if (needsTranslation(targetFormat, clientResponseFormat)) {
     // Standard translation for other providers
@@ -737,7 +739,8 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
       requestToolIdentityMap,
       // The CLIENT's declared tools[]: an Anthropic-format client gets its own
       // tool-name casing back from any provider (OpenCode `read`, Claude Code `Read`).
-      (body as Record<string, unknown> | null | undefined)?.tools ?? null
+      (body as Record<string, unknown> | null | undefined)?.tools ?? null,
+      () => hasTrustedEmptyTurn(providerResponse)
     );
   } else {
     log?.debug?.("STREAM", `Standard passthrough mode`);
