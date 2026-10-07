@@ -29,6 +29,8 @@ export type CostCalculationOptions = {
   provider?: string | null;
   model?: string | null;
   serviceTier?: string | null;
+  /** Inclusive prompt size of each request in an aggregated, same-size group. */
+  pricingInputTokens?: number;
   /**
    * When true, return $0 for flat-rate (subscription / cookie-web) providers
    * instead of the per-token estimate (#5552). Opt-in so only analytics/display
@@ -218,17 +220,19 @@ export function computeCostFromPricing(
   // to show $0 instead of an inflated estimate (#5552).
   if (options.flatRateAsZero && isFlatRateProvider(options.provider)) return 0;
   const inputTokens = tokens.input ?? tokens.prompt_tokens ?? tokens.input_tokens ?? 0;
-  const rates = applyLongContextTier(pricing, inputTokens);
+  // Long-context tier is selected by the per-request prompt size (aggregated rows
+  // pass it via pricingInputTokens) and honors the tier's `inclusive` boundary.
+  const rates = applyLongContextTier(pricing, options.pricingInputTokens ?? inputTokens);
   const inputPrice = toNumber(rates.input, 0);
   const cachedPrice = toNumber(rates.cached, inputPrice);
   const outputPrice = toNumber(rates.output, 0);
   const reasoningPrice = toNumber(rates.reasoning, outputPrice);
   const cacheCreationPrice = toNumber(rates.cache_creation, inputPrice);
 
-  let cost = 0;
   const cachedTokens =
     tokens.cacheRead ?? tokens.cached_tokens ?? tokens.cache_read_input_tokens ?? 0;
   const cacheCreationTokens = tokens.cacheCreation ?? tokens.cache_creation_input_tokens ?? 0;
+  let cost = 0;
 
   // prompt_tokens from extractors already includes cache_read + cache_creation,
   // so we must subtract BOTH cache types to avoid pricing cache at the full

@@ -3,6 +3,8 @@
  *
  * Aggregates usage data into stats for the dashboard:
  * totals, by provider/model/account/apiKey, 10-minute buckets.
+ * Cost-source groups retain each request's inclusive prompt size for context tiers;
+ * public buckets merge those groups, and archived summaries retain their stored cost.
  *
  * @module lib/usage/usageStats
  */
@@ -108,6 +110,7 @@ function buildUsageSourceSql(aggregationEnabled: boolean) {
         COALESCE(tokens_cache_creation, 0) as tokens_cache_creation,
         COALESCE(tokens_reasoning, 0) as tokens_reasoning,
         COALESCE(tokens_input, 0) as cost_tokens_input,
+        COALESCE(tokens_input, 0) as pricing_input_tokens,
         COALESCE(tokens_output, 0) as cost_tokens_output,
         COALESCE(tokens_cache_read, 0) as cost_tokens_cache_read,
         COALESCE(tokens_cache_creation, 0) as cost_tokens_cache_creation,
@@ -133,6 +136,7 @@ function buildUsageSourceSql(aggregationEnabled: boolean) {
       COALESCE(tokens_cache_creation, 0) as tokens_cache_creation,
       COALESCE(tokens_reasoning, 0) as tokens_reasoning,
       COALESCE(tokens_input, 0) as cost_tokens_input,
+      COALESCE(tokens_input, 0) as pricing_input_tokens,
       COALESCE(tokens_output, 0) as cost_tokens_output,
       COALESCE(tokens_cache_read, 0) as cost_tokens_cache_read,
       COALESCE(tokens_cache_creation, 0) as cost_tokens_cache_creation,
@@ -158,6 +162,8 @@ function buildUsageSourceSql(aggregationEnabled: boolean) {
       0 as tokens_cache_creation,
       0 as tokens_reasoning,
       0 as cost_tokens_input,
+      -- Archived summaries lack per-request sizes; retain stored_cost without repricing.
+      NULL as pricing_input_tokens,
       0 as cost_tokens_output,
       0 as cost_tokens_cache_read,
       0 as cost_tokens_cache_creation,
@@ -171,6 +177,7 @@ function buildUsageSourceSql(aggregationEnabled: boolean) {
 }
 
 const AGGREGATE_FIELDS = `
+  pricing_input_tokens,
   SUM(request_count) as request_count,
   COALESCE(SUM(tokens_input), 0) as tokens_input,
   COALESCE(SUM(tokens_output), 0) as tokens_output,
@@ -201,7 +208,12 @@ async function calculateAggregateCost(row: JsonRecord): Promise<number> {
       cacheCreation: toNumber(row.cost_tokens_cache_creation ?? row.tokens_cache_creation),
       reasoning: toNumber(row.cost_tokens_reasoning ?? row.tokens_reasoning),
     },
-    { provider, serviceTier, flatRateAsZero: true }
+    {
+      provider,
+      serviceTier,
+      flatRateAsZero: true,
+      pricingInputTokens: toNumber(row.pricing_input_tokens),
+    }
   );
   // daily_usage_summary stores API-equivalent value so the dedicated costs
   // view can preserve history. This legacy stats surface keeps billed-cost
@@ -278,6 +290,8 @@ export async function getConnectionSpendUsdSinceAdded(
   const rows = db
     .prepare(
       `SELECT model,
+          COALESCE(service_tier, 'standard') AS serviceTier,
+          COALESCE(tokens_input, 0) AS pricingInputTokens,
           COALESCE(SUM(tokens_input), 0) AS input,
           COALESCE(SUM(tokens_output), 0) AS output,
           COALESCE(SUM(tokens_cache_read), 0) AS cacheRead,
@@ -286,10 +300,12 @@ export async function getConnectionSpendUsdSinceAdded(
           COUNT(*) AS requests
        FROM usage_history
        WHERE connection_id = ? AND provider = ? AND success = 1
-       GROUP BY model`
+       GROUP BY model, COALESCE(service_tier, 'standard'), COALESCE(tokens_input, 0)`
     )
     .all(connectionId, provider) as Array<{
     model?: string;
+    serviceTier?: string;
+    pricingInputTokens?: number;
     input?: number;
     output?: number;
     cacheRead?: number;
@@ -314,6 +330,8 @@ export async function getConnectionSpendUsdSinceAdded(
       provider,
       model,
       flatRateAsZero: true,
+      serviceTier: row.serviceTier,
+      pricingInputTokens: Number(row.pricingInputTokens ?? 0),
     });
   }
 
@@ -409,7 +427,7 @@ export async function getUsageStats() {
         WITH usage_source AS (${sourceSql})
         SELECT provider, model, service_tier, ${AGGREGATE_FIELDS}
         FROM usage_source
-        GROUP BY provider, model, service_tier
+        GROUP BY provider, model, service_tier, pricing_input_tokens
       `
     )
     .all(...sourceParams) as unknown[];
@@ -466,7 +484,7 @@ export async function getUsageStats() {
         SELECT provider, model, connection_id, service_tier, ${AGGREGATE_FIELDS}
         FROM usage_source
         WHERE connection_id IS NOT NULL AND connection_id != ''
-        GROUP BY provider, model, connection_id, service_tier
+        GROUP BY provider, model, connection_id, service_tier, pricing_input_tokens
       `
     )
     .all(...sourceParams) as unknown[];
@@ -520,7 +538,7 @@ export async function getUsageStats() {
         FROM usage_source
         WHERE (api_key_id IS NOT NULL AND api_key_id != '')
            OR (api_key_name IS NOT NULL AND api_key_name != '')
-        GROUP BY provider, model, api_key_id, api_key_name, service_tier
+        GROUP BY provider, model, api_key_id, api_key_name, service_tier, pricing_input_tokens
       `
     )
     .all(...sourceParams) as unknown[];
@@ -575,6 +593,7 @@ export async function getUsageStats() {
           model,
           COALESCE(service_tier, 'standard') as service_tier,
           COUNT(*) as request_count,
+          COALESCE(tokens_input, 0) as pricing_input_tokens,
           COALESCE(SUM(tokens_input), 0) as tokens_input,
           COALESCE(SUM(tokens_output), 0) as tokens_output,
           COALESCE(SUM(tokens_cache_read), 0) as tokens_cache_read,
@@ -582,7 +601,7 @@ export async function getUsageStats() {
           COALESCE(SUM(tokens_reasoning), 0) as tokens_reasoning
         FROM usage_history
         WHERE timestamp >= ? AND timestamp <= ?
-        GROUP BY minute, provider, model, service_tier
+        GROUP BY minute, provider, model, service_tier, COALESCE(tokens_input, 0)
       `
     )
     .all(tenMinutesAgo.toISOString(), now.toISOString()) as unknown[];

@@ -1,10 +1,15 @@
 import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
-import { getProviderById } from "@/shared/constants/providers";
+import {
+  getProviderById,
+  isAnthropicCompatibleProvider,
+  isOpenAICompatibleProvider,
+} from "@/shared/constants/providers";
 import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { serveAnalyticsCached } from "@/lib/usage/analyticsResponseCache";
 import { getApiKeys } from "@/lib/db/apiKeys";
 import { getUserDatabaseSettings } from "@/lib/db/databaseSettings";
+import { getPricing, getPricingForModel } from "@/lib/db/settings/pricing";
 import {
   buildUnifiedSource,
   buildPresetUnifiedSource,
@@ -352,6 +357,7 @@ function computeUsageRowCost(
       model,
       serviceTier,
       flatRateAsZero,
+      pricingInputTokens: toNumber(row.pricingInputTokens),
     }
   );
 }
@@ -512,7 +518,6 @@ async function computeAnalyticsResponse(
     });
 
     // Fetch pricing data for cost calculation (no rows loaded)
-    const { getPricing } = await import("@/lib/db/settings");
     const rawPricingByProvider = (await getPricing()) as PricingByProvider;
 
     // Pre-process pricing data to lowercase keys for O(1) lookups
@@ -531,6 +536,34 @@ async function computeAnalyticsResponse(
       cache: new Map(),
       reverseAlias: { ...PROVIDER_ID_TO_ALIAS },
       ...(misses ? { misses } : {}),
+    };
+    // Compatible providers price via per-model rows; warm them into pricingByProvider
+    // before any resolution (and before pricingContext caches a miss for that key).
+    const resolvedCompatiblePrices = new Set<string>();
+    const warmCompatiblePricing = async (rows: UsageRows) => {
+      for (const row of rows) {
+        const provider = toStringValue(row.provider).toLowerCase();
+        const model = toStringValue(row.model).toLowerCase();
+        if (
+          (!isAnthropicCompatibleProvider(provider) && !isOpenAICompatibleProvider(provider)) ||
+          !model
+        )
+          continue;
+        const key = `${provider}/${model}`;
+        if (resolvedCompatiblePrices.has(key)) continue;
+        resolvedCompatiblePrices.add(key);
+        let pricing = await getPricingForModel(provider, model);
+        const normalizedModel = normalizeModelName(model);
+        if (!pricing && normalizedModel !== model) {
+          pricing = await getPricingForModel(provider, normalizedModel);
+        }
+        if (pricing) {
+          pricingByProvider[provider] ||= {};
+          pricingByProvider[provider][model] = pricing;
+          // New rows can change earlier misses/global-fallback hits.
+          pricingContext.cache.clear();
+        }
+      }
     };
 
     const summaryRow = getUsageSummary(unifiedSource, unifiedParams) as Record<string, unknown>;
@@ -580,6 +613,14 @@ async function computeAnalyticsResponse(
     const apiKeyRows = getApiKeyUsageRows(apiKeyWhereClause, params) as UsageRows;
 
     const serviceTierRows = getServiceTierUsageRows(unifiedSource, unifiedParams) as UsageRows;
+    // Use the same custom-node model lookup and estimated fallback as budgets
+    // before synchronous aggregation, without pricing each SQL group differently.
+    await warmCompatiblePricing(dailyCostRows);
+    await warmCompatiblePricing(modelRows);
+    await warmCompatiblePricing(providerCostRows);
+    await warmCompatiblePricing(accountCostRows);
+    await warmCompatiblePricing(apiKeyRows);
+    await warmCompatiblePricing(serviceTierRows);
 
     const apiKeyMetadataRows = getApiKeyMetadataRows(apiKeyWhereClause, params) as UsageRows;
 
@@ -1040,6 +1081,7 @@ async function computeAnalyticsResponse(
         });
 
         const presetModelRows = getPresetCostModelRows(pSrc, pParams) as UsageRows;
+        await warmCompatiblePricing(presetModelRows);
 
         let presetTotalCost = 0;
         for (const row of presetModelRows) {
