@@ -112,6 +112,42 @@ test("error-only SSE (no choices) → invalid_sse surfacing the upstream error (
   assert.equal(res.looksLikeSSE, true);
 });
 
+test("native Responses failure keeps its error and usage when detected for an OpenAI caller", async () => {
+  const response = {
+    object: "response",
+    status: "failed",
+    output: [],
+    error: { code: "rate_limit_exceeded", message: "Quota exhausted" },
+    usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+  };
+  const res = await parseNonStreamingResponseBody({
+    ...baseOpts,
+    providerResponse: makeResponse(
+      `data: ${JSON.stringify({ type: "response.failed", response })}\n\n`,
+      "text/event-stream"
+    ),
+  });
+  assert.equal(res.kind, "ok");
+  if (res.kind !== "ok") return;
+  assert.equal(res.responsePayloadFormat, "openai-responses");
+  assert.equal(res.responseBody.status, "failed");
+  assert.deepEqual(res.responseBody.error, response.error);
+  assert.deepEqual(res.responseBody.usage, response.usage);
+});
+
+test("native Responses caller retains a bare error as a failed snapshot", async () => {
+  const error = { code: "server_error", message: "Upstream unavailable" };
+  const res = await parseNonStreamingResponseBody({
+    ...baseOpts,
+    targetFormat: "openai-responses",
+    providerResponse: makeResponse(`data: ${JSON.stringify({ error })}\n\n`, "text/event-stream"),
+  });
+  assert.equal(res.kind, "ok");
+  if (res.kind !== "ok") return;
+  assert.equal(res.responseBody.status, "failed");
+  assert.deepEqual(res.responseBody.error, error);
+});
+
 test("unparseable SSE with no embedded error → generic invalid_sse message", async () => {
   const sse = "data: not-json-at-all\n\n";
   const res = await parseNonStreamingResponseBody({

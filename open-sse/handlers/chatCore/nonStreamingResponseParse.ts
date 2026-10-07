@@ -93,12 +93,29 @@ export async function parseNonStreamingResponseBody(opts: {
     // Upstream returned an event stream for a non-streaming client; convert best-effort to JSON.
     const parsedFromSSE = parseNonStreamingSSEPayload(streamPayload, targetFormat, model);
 
+    // The Responses parser can retain a bare error as a failed snapshot for
+    // native Responses callers. A generic SSE error is still a parse failure
+    // here, not a successfully parsed completion in a guessed wire format.
+    const surfacedSseError = extractSSEErrorMessage(streamPayload);
+    if (
+      surfacedSseError &&
+      parsedFromSSE?.format === "openai-responses" &&
+      targetFormat !== "openai-responses" &&
+      !/(?:"type"\s*:\s*"response\.|"object"\s*:\s*"response")/.test(streamPayload)
+    ) {
+      return {
+        kind: "invalid_sse",
+        message: surfacedSseError,
+        looksLikeSSE: true,
+        normalizedProviderPayload,
+      };
+    }
+
     if (!parsedFromSSE) {
       // Some executors (e.g. the Devin/Windsurf CLI) always emit text/event-stream, signalling
       // failure with an error-only chunk (`data: {"error":{"message":"Devin CLI not found..."}}`)
       // that carries no `choices`. Surface that real, sanitized message instead of the generic 502
       // so the actionable error is not swallowed (#3324).
-      const surfacedSseError = extractSSEErrorMessage(streamPayload);
       const invalidSseMessage =
         surfacedSseError || "Invalid SSE response for non-streaming request";
       return {
