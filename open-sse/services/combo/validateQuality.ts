@@ -392,7 +392,9 @@ export async function validateResponseQuality(
   provider?: string | null
 ): Promise<ResponseQualityResult> {
   const permitsEmptyTurn = () =>
-    typeof trustedEmptyTurn === "function" ? trustedEmptyTurn() : trustedEmptyTurn;
+    typeof trustedEmptyTurn === "function"
+      ? trustedEmptyTurn() === true
+      : trustedEmptyTurn === true;
   // Issue #3685: For Claude SSE streaming responses, use a BOUNDED PEEK to
   // detect the empty-content-block pattern (content_filter stop_reason with
   // no content_block_* events) WITHOUT de-streaming non-empty responses.
@@ -956,8 +958,10 @@ export async function validateResponseQuality(
   if (json?.object === "response") {
     if (
       !responsesApiOutputHasContent(json.output) &&
-      !(isSuccessfulResponsesCompletion(json) &&
-        (permitsEmptyTurn() || isTrustedEmptyStop(provider, "stop", json.usage)))
+      !(
+        isSuccessfulResponsesCompletion(json) &&
+        (permitsEmptyTurn() || isTrustedEmptyStop(provider, "stop", json.usage))
+      )
     )
       return { valid: false, reason: "empty_choices" };
     const status = typeof json.status === "string" ? json.status : "";

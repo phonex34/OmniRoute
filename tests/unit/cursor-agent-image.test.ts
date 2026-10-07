@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { IMAGE_PROVIDERS, parseImageModel, getImageProvider } from "../../open-sse/config/imageRegistry.ts";
+import { IMAGE_PROVIDERS } from "../../open-sse/config/imageRegistryData.ts";
+import { parseImageModel, getImageProvider } from "../../open-sse/config/imageRegistry.ts";
 import {
   buildCursorAgentAuthEnv,
   buildCursorAgentImagePrompt,
