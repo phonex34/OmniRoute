@@ -7,8 +7,9 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-const { default: MediaPageClient } =
-  await import("../../../src/app/(dashboard)/dashboard/cache/media/MediaPageClient");
+// The server page serializes the image registry into the client's props.
+const { default: MediaPage } =
+  await import("../../../src/app/(dashboard)/dashboard/cache/media/page");
 const { chooseKitSelectValue, kitSelectByLabel, kitSelectOptions, kitSelectValue } =
   await import("../../helpers/kitSelect");
 
@@ -38,7 +39,7 @@ async function renderPage(
   document.body.appendChild(el);
   root = createRoot(el);
   await act(async () => {
-    root.render(<MediaPageClient />);
+    root.render(<MediaPage />);
   });
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));

@@ -18,7 +18,6 @@ import SegmentedControl, {
 } from "@/shared/components/SegmentedControl";
 import Select from "@/shared/components/Select";
 import Textarea from "@/shared/components/Textarea";
-import { IMAGE_PROVIDERS } from "@omniroute/open-sse/config/imageRegistryData.ts";
 import { VIDEO_PROVIDERS } from "@omniroute/open-sse/config/videoRegistry.ts";
 import { MUSIC_PROVIDERS } from "@omniroute/open-sse/config/musicRegistry.ts";
 import {
@@ -41,7 +40,6 @@ type GenerationResult = {
   timestamp: number;
   audioUrl?: string;
 };
-const IMAGE_PROVIDER_MODELS = toProviderModels(IMAGE_PROVIDERS);
 const VIDEO_PROVIDER_MODELS = toProviderModels(VIDEO_PROVIDERS);
 const MUSIC_PROVIDER_MODELS = toProviderModels(MUSIC_PROVIDERS);
 const SPEECH_PROVIDER_MODELS = toProviderModels(AUDIO_SPEECH_PROVIDERS);
@@ -88,35 +86,24 @@ const MODALITY_CONFIG: Record<
   },
 };
 
-// Provider+model registry derived from runtime registries to avoid dashboard drift
-const PROVIDER_MODELS: Record<Modality, ProviderModelGroup[]> = {
-  image: IMAGE_PROVIDER_MODELS,
-  video: VIDEO_PROVIDER_MODELS,
-  music: MUSIC_PROVIDER_MODELS,
-  speech: SPEECH_PROVIDER_MODELS,
-  transcription: TRANSCRIPTION_PROVIDER_MODELS,
-};
-const INITIAL_IMAGE_PROVIDER = PROVIDER_MODELS.image[0];
-const INITIAL_IMAGE_MODEL = INITIAL_IMAGE_PROVIDER?.models[0];
-
-// KEA-9390: the registry behind each tab says where a provider's credentials come from, so
-// the page can tell — before sending anything — that a provider has no connection to run on.
-const PROVIDER_REGISTRIES: Record<Modality, MediaProviderRegistry> = {
-  image: IMAGE_PROVIDERS,
-  video: VIDEO_PROVIDERS,
-  music: MUSIC_PROVIDERS,
-  speech: AUDIO_SPEECH_PROVIDERS,
-  transcription: AUDIO_TRANSCRIPTION_PROVIDERS,
+/**
+ * The providers and credential registries behind each tab. Image data is serialized by the
+ * server page so the DB-backed image registry never enters the browser bundle.
+ */
+type MediaCatalog = {
+  models: Record<Modality, ProviderModelGroup[]>;
+  registries: Record<Modality, MediaProviderRegistry>;
 };
 
 function connectionStateFor(
+  catalog: MediaCatalog,
   tab: Modality,
   providerId: string,
   connectedProviders: ReadonlySet<string> | null
 ): MediaProviderConnectionState {
   return resolveMediaProviderConnectionState(
     providerId,
-    PROVIDER_REGISTRIES[tab],
+    catalog.registries[tab],
     connectedProviders,
     // Only /v1/audio/transcriptions retries a gateway that lists the same model.
     { gatewayFallback: tab === "transcription" }
@@ -127,8 +114,12 @@ function connectionStateFor(
 const LOCAL_PROVIDERS = ["sdwebui", "comfyui"];
 
 /** The providers a tab lists: a local one only when it is configured. */
-function listedProviders(tab: Modality, configuredLocal: ReadonlySet<string>) {
-  return (PROVIDER_MODELS[tab] ?? []).filter(
+function listedProviders(
+  catalog: MediaCatalog,
+  tab: Modality,
+  configuredLocal: ReadonlySet<string>
+) {
+  return (catalog.models[tab] ?? []).filter(
     (p) => !LOCAL_PROVIDERS.includes(p.id) || configuredLocal.has(p.id)
   );
 }
@@ -138,14 +129,15 @@ function listedProviders(tab: Modality, configuredLocal: ReadonlySet<string>) {
  * connected one, else `currentId` (or the first listed provider when there is none).
  */
 function preferredProvider(
+  catalog: MediaCatalog,
   tab: Modality,
   currentId: string | null,
   configuredLocal: ReadonlySet<string>,
   connectedProviders: ReadonlySet<string> | null
 ): ProviderModelGroup | undefined {
-  const providers = listedProviders(tab, configuredLocal);
+  const providers = listedProviders(catalog, tab, configuredLocal);
   const preferredId = pickPreferredMediaProvider(providers, currentId ?? providers[0]?.id, (id) =>
-    connectionStateFor(tab, id, connectedProviders)
+    connectionStateFor(catalog, tab, id, connectedProviders)
   );
   return providers.find((p) => p.id === preferredId);
 }
@@ -156,12 +148,14 @@ function preferredProvider(
  * preferred one.
  */
 function providerToOpenOn(
+  catalog: MediaCatalog,
   current: { tab: Modality; provider: string },
   configuredLocal: ReadonlySet<string>,
   connectedProviders: ReadonlySet<string> | null
 ): string | null {
   if (!connectedProviders) return null;
   const preferred = preferredProvider(
+    catalog,
     current.tab,
     current.provider,
     configuredLocal,
@@ -169,7 +163,6 @@ function providerToOpenOn(
   );
   return preferred && preferred.id !== current.provider ? preferred.id : null;
 }
-
 // Voice presets per TTS provider
 const VOICE_PRESETS: Record<string, { id: string; label: string }[]> = {
   default: [
@@ -505,7 +498,35 @@ function ImageResults({ data }: { data: any }) {
   );
 }
 
-export default function MediaPageClient() {
+export default function MediaPageClient({
+  imageProviderModels,
+  imageProviderRegistry,
+}: {
+  imageProviderModels: ProviderModelGroup[];
+  imageProviderRegistry: MediaProviderRegistry;
+}) {
+  // Only serialized image metadata crosses from the server registry into this client.
+  const catalog: MediaCatalog = {
+    models: {
+      image: imageProviderModels,
+      video: VIDEO_PROVIDER_MODELS,
+      music: MUSIC_PROVIDER_MODELS,
+      speech: SPEECH_PROVIDER_MODELS,
+      transcription: TRANSCRIPTION_PROVIDER_MODELS,
+    },
+    // KEA-9390: the registry behind each tab says where a provider's credentials come from,
+    // so the page can tell — before sending anything — that a provider has no connection.
+    registries: {
+      image: imageProviderRegistry,
+      video: VIDEO_PROVIDERS,
+      music: MUSIC_PROVIDERS,
+      speech: AUDIO_SPEECH_PROVIDERS,
+      transcription: AUDIO_TRANSCRIPTION_PROVIDERS,
+    },
+  };
+  const PROVIDER_MODELS = catalog.models;
+  const initialImageProvider = imageProviderModels[0];
+  const initialImageModel = initialImageProvider?.models[0];
   const t = useTranslations("media");
   const tc = useTranslations("common");
   const tSidebar = useTranslations("sidebar");
@@ -514,10 +535,8 @@ export default function MediaPageClient() {
   const [prompt, setPrompt] = useState("");
 
   // Selected provider and model per modality
-  const [selectedProvider, setSelectedProvider] = useState<string>(
-    INITIAL_IMAGE_PROVIDER?.id ?? ""
-  );
-  const [selectedModel, setSelectedModel] = useState<string>(INITIAL_IMAGE_MODEL?.id ?? "");
+  const [selectedProvider, setSelectedProvider] = useState<string>(initialImageProvider?.id ?? "");
+  const [selectedModel, setSelectedModel] = useState<string>(initialImageModel?.id ?? "");
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<GenerationResult | null>(null);
@@ -550,7 +569,7 @@ export default function MediaPageClient() {
   const providerPicked = useRef(false);
   const selection = useRef<{ tab: Modality; provider: string }>({
     tab: "image",
-    provider: INITIAL_IMAGE_PROVIDER?.id ?? "",
+    provider: initialImageProvider?.id ?? "",
   });
 
   useEffect(() => {
@@ -603,7 +622,7 @@ export default function MediaPageClient() {
         setConnectedProviders(connected);
         const next = providerPicked.current
           ? null
-          : providerToOpenOn(selection.current, configured, connected);
+          : providerToOpenOn(catalog, selection.current, configured, connected);
         if (next) applyProvider(selection.current.tab, next);
       })
       .catch(() => {
@@ -612,7 +631,7 @@ export default function MediaPageClient() {
   }, []);
 
   // Filter out unconfigured local providers from the provider list
-  const currentProviders = listedProviders(activeTab, configuredLocalProviders);
+  const currentProviders = listedProviders(catalog, activeTab, configuredLocalProviders);
   const currentModels = currentProviders.find((p) => p.id === selectedProvider)?.models ?? [];
 
   const switchTab = (tab: Modality) => {
@@ -627,6 +646,7 @@ export default function MediaPageClient() {
     // Pick the first connected provider (else the first listed one) and its first model. Only
     // providers the list shows: a local one that is not set up is not a choice.
     const firstProvider = preferredProvider(
+      catalog,
       tab,
       null,
       configuredLocalProviders,
@@ -803,7 +823,7 @@ export default function MediaPageClient() {
   // KEA-9390: a provider that needs a connection and has none cannot run — say so and keep
   // the request from being sent, instead of waiting for the server's "No credentials" answer.
   const connectionStateOf = (providerId: string) =>
-    connectionStateFor(activeTab, providerId, connectedProviders);
+    connectionStateFor(catalog, activeTab, providerId, connectedProviders);
   const selectedProviderName =
     currentProviders.find((p) => p.id === selectedProvider)?.name ?? selectedProvider;
   const isSelectedNotConnected =
