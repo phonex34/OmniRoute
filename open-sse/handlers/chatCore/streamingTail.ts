@@ -1,4 +1,4 @@
-import { inheritEmptyTurnPolicy } from "../../utils/emptyTurnPolicy.ts";
+import { hasTrustedEmptyTurn, inheritEmptyTurnPolicy } from "../../utils/emptyTurnPolicy.ts";
 import { getCodexClientSessionId } from "../../config/codexIdentity.ts";
 import { modelAfterFamilyFallback } from "../../services/modelFamilyFallbackPolicy.ts";
 import {
@@ -690,7 +690,9 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
       // openai-responses → openai translation still wants the namespace identity
       // map for #7936-style round-trip closure when the client also speaks
       // Responses (Codex CLI).
-      requestToolIdentityMap
+      requestToolIdentityMap,
+      undefined,
+      () => hasTrustedEmptyTurn(providerResponse)
     );
   } else if (needsTranslation(targetFormat, clientResponseFormat)) {
     // Standard translation for other providers
@@ -721,7 +723,9 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
       }),
       requestedThinking,
       customToolNames,
-      requestToolIdentityMap
+      requestToolIdentityMap,
+      undefined,
+      () => hasTrustedEmptyTurn(providerResponse)
     );
   } else {
     log?.debug?.("STREAM", `Standard passthrough mode`);
