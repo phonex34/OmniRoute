@@ -233,6 +233,7 @@ export function computeUsageRowCost(
   );
   if (!pricing) return rawStoredCost;
 
+  const pricingInputTokens = toNumber(row.pricingInputTokens);
   return (
     rawStoredCost +
     computeCostFromPricing(pricing, getPriceableTokens(row), {
@@ -240,8 +241,10 @@ export function computeUsageRowCost(
       model,
       serviceTier,
       flatRateAsZero,
-      // Analytics rows sum many requests: no per-request long-context tier (#19429).
-      aggregatedTokens: true,
+      // Same-size groups price the long-context tier from the per-request prompt size,
+      // never the summed one (mirrors budget pricing). Rows that sum many requests —
+      // rollups, legacy rows without a per-request size — keep base rates (#19429).
+      ...(pricingInputTokens > 0 ? { pricingInputTokens } : { aggregatedTokens: true }),
     })
   );
 }
