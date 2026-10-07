@@ -5,14 +5,16 @@ import {
   isTrustedEmptyStop,
 } from "../../open-sse/services/errorClassifier.ts";
 import { validateResponseQuality } from "../../open-sse/services/combo/validateQuality.ts";
-import {
-  createDisconnectAwareStream,
-  createStreamController,
-} from "../../open-sse/utils/streamHandler.ts";
+import { pipeWithDisconnect, createStreamController } from "../../open-sse/utils/streamHandler.ts";
 import { FORMATS } from "../../open-sse/translator/formats.ts";
 import { detectMalformedNonStream } from "../../open-sse/utils/diagnostics.ts";
 import { createSSEStream } from "../../open-sse/utils/stream.ts";
 import { isCleanEmptyClaudeStop } from "../../open-sse/utils/streamClaudeEmptyBody.ts";
+import {
+  hasTrustedEmptyTurn,
+  markEmptyTurnExecution,
+} from "../../open-sse/utils/emptyTurnPolicy.ts";
+import { getRegistryEntry } from "../../open-sse/config/providerRegistry.ts";
 
 const silentLog = { warn: () => undefined };
 const reportedUsages = [
@@ -33,20 +35,28 @@ const json = (body: object) =>
 const quality = (response: Response, streaming: boolean, provider = "codex") =>
   validateResponseQuality(response, streaming, silentLog, undefined, undefined, false, provider);
 
-async function clientSees(frames: string[], provider: string, format: string) {
-  const watched = createDisconnectAwareStream(
-    {
-      readable: sse(frames).body!,
-      writable: { getWriter: () => ({ abort: () => Promise.resolve() }) },
-    },
+function nativeExecution(response: Response, format: string): Response {
+  const provider =
+    format === FORMATS.CLAUDE ? "anthropic" : format === FORMATS.OPENAI ? "openai" : "codex";
+  return markEmptyTurnExecution(response, getRegistryEntry(provider)!.baseUrl!, {
+    connectionId: "native-test-connection",
+    accessToken: "native-test-token",
+  });
+}
+
+async function clientSees(frames: string[], provider: string, format: string, trusted = false) {
+  const upstream = sse(frames);
+  const watched = pipeWithDisconnect(
+    trusted ? nativeExecution(upstream, format) : upstream,
+    new TransformStream(),
     createStreamController({ provider, model: "m", clientResponseFormat: format })
   );
   return new Response(watched).text();
 }
 
 // Live capture 2026-10-06 (watchdog prompt, "silence preferred"): Codex completes
-// with an empty final_answer, status "completed", output 4 / reasoning 0. Trust
-// rests on the upstream completion, never on token counters.
+// with an empty final_answer, status "completed", output 4 / reasoning 0.
+// Watcher acceptance additionally requires authenticated native execution trust.
 function silentEvents(usage: object, terminal = "completed") {
   const message = {
     id: "msg_silent",
@@ -119,7 +129,8 @@ async function translate(
   frames: string[],
   clientFormat: string,
   fragmented = false,
-  trailingNewline = true
+  trailingNewline = true,
+  trusted = true
 ) {
   const bytes = new TextEncoder().encode(
     trailingNewline ? frames.join("") : frames.join("").trimEnd()
@@ -132,20 +143,20 @@ async function translate(
       controller.close();
     },
   });
-  const transformed = source.pipeThrough(
+  const raw = new Response(source, {
+    headers: { "Content-Type": "text/event-stream" },
+  });
+  const upstream = trusted ? nativeExecution(raw, FORMATS.OPENAI_RESPONSES) : raw;
+  const watched = pipeWithDisconnect(
+    upstream,
     createSSEStream({
       targetFormat: FORMATS.OPENAI_RESPONSES,
       sourceFormat: clientFormat,
       provider: "codex",
+      trustedEmptyTurn: () => hasTrustedEmptyTurn(upstream),
       model: "gpt-6.1-sol",
       body: { messages: [{ role: "user", content: "hi" }] },
-    })
-  );
-  const watched = createDisconnectAwareStream(
-    {
-      readable: transformed,
-      writable: { getWriter: () => ({ abort: () => Promise.resolve() }) },
-    },
+    }),
     createStreamController({ provider: "codex", model: "m", clientResponseFormat: clientFormat })
   );
   return new Response(watched).text().catch((error: Error) => `THREW ${error.message}`);
@@ -174,7 +185,7 @@ test("Codex completed empty turn with zero generated output still fails over", a
   );
   assert.equal((await quality(sse(frames), true)).valid, false);
   for (const format of [FORMATS.CLAUDE, FORMATS.OPENAI]) {
-    const text = await translate(frames, format);
+    const text = await translate(frames, format, false, true, false);
     assert.equal((await quality(sse([text]), true)).valid, false, format);
     assert.doesNotMatch(text, /\(empty response\)|"type":"text_delta"/);
   }
@@ -216,7 +227,7 @@ for (const usage of reportedUsages.slice(1)) {
       [frames, FORMATS.OPENAI_RESPONSES],
       [chatFrames, FORMATS.OPENAI],
     ] as const) {
-      const seen = await clientSees(stream, "codex", format);
+      const seen = await clientSees(stream, "codex", format, true);
       assert.equal(seen, stream.join(""), format);
       assert.equal((await quality(sse(stream), true)).valid, true, format);
     }
@@ -242,6 +253,96 @@ for (const usage of reportedUsages.slice(1)) {
     }
   });
 }
+
+test("generated Codex usage alone never grants watcher execution trust", async () => {
+  for (const usage of reportedUsages.slice(1)) {
+    for (const [frames, format] of [
+      [silentEvents(usage), FORMATS.OPENAI_RESPONSES],
+      [
+        [
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage })}\n\n`,
+          "data: [DONE]\n\n",
+        ],
+        FORMATS.OPENAI,
+      ],
+    ] as const) {
+      assert.match(
+        await clientSees([...frames], "codex", format),
+        /response\.failed|"finish_reason":"error"/
+      );
+    }
+    for (const format of [FORMATS.CLAUDE, FORMATS.OPENAI]) {
+      const text = await translate(silentEvents(usage), format, true, false, false);
+      assert.match(text, /"type":"error"|"finish_reason":"error"/);
+    }
+  }
+});
+
+test("authenticated native Codex ordinary completion does not require generated-token counters", async () => {
+  const frames = silentEvents(reportedUsages[0]);
+  assert.equal(await clientSees(frames, "codex", FORMATS.OPENAI_RESPONSES, true), frames.join(""));
+  for (const format of [FORMATS.OPENAI, FORMATS.CLAUDE]) {
+    const text = await translate(frames, format, true, false);
+    assert.doesNotMatch(text, /"type":"error"|"finish_reason":"error"|THREW/);
+    assert.match(
+      text,
+      format === FORMATS.CLAUDE ? /"stop_reason":"end_turn"/ : /"finish_reason":"stop"/
+    );
+    assert.doesNotMatch(text, /\(empty response\)|"type":"text_delta"/);
+  }
+});
+
+// Live capture 2026-10-16: the Codex HTTP path delivered the SSE body with no
+// content-type header, so provenance parsed the whole stream as one JSON value,
+// never saw response.completed, and the watcher appended an empty-content 502
+// after the client had already received stop + [DONE].
+test("native Codex silent turn without a content-type header is still trusted", async () => {
+  const markHeaderless = (frames: string[], chunk: number) => {
+    const bytes = new TextEncoder().encode(frames.join(""));
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < bytes.length; i += chunk)
+          controller.enqueue(bytes.subarray(i, i + chunk));
+        controller.close();
+      },
+    });
+    const raw = new Response(body);
+    raw.headers.delete("content-type");
+    return markEmptyTurnExecution(raw, getRegistryEntry("codex")!.baseUrl!, {
+      connectionId: "native-test-connection",
+      accessToken: "native-test-token",
+    });
+  };
+  for (const chunk of [1 << 20, 7]) {
+    const frames = silentEvents(reportedUsages[1]);
+    const upstream = markHeaderless(frames, chunk);
+    const watched = pipeWithDisconnect(
+      upstream,
+      createSSEStream({
+        targetFormat: FORMATS.OPENAI_RESPONSES,
+        sourceFormat: FORMATS.OPENAI,
+        provider: "codex",
+        trustedEmptyTurn: () => hasTrustedEmptyTurn(upstream),
+        model: "gpt-6.1-sol",
+        body: { messages: [{ role: "user", content: "hi" }] },
+      }),
+      createStreamController({
+        provider: "codex",
+        model: "m",
+        clientResponseFormat: FORMATS.OPENAI,
+      })
+    );
+    const text = await new Response(watched).text();
+    assert.equal(hasTrustedEmptyTurn(upstream), true, `chunk ${chunk}`);
+    assert.doesNotMatch(text, /empty content|"finish_reason":"error"/, `chunk ${chunk}`);
+    assert.match(text, /"finish_reason":"stop"/);
+  }
+
+  // A headerless failed terminal must still never become trusted.
+  const failed = markHeaderless(silentEvents(reportedUsages[1], "failed"), 1 << 20);
+  await failed.text();
+  assert.equal(hasTrustedEmptyTurn(failed), false);
+});
 
 test("unfinished and unsuccessful Codex terminals never become silent success", async () => {
   for (const terminal of [
@@ -371,7 +472,7 @@ test("native Claude clean empty stops survive passthrough while combo requires c
       );
       const text = await new Response(transformed).text();
       assert.equal(text, frames.join(""));
-      assert.equal(await clientSees([text], provider, FORMATS.CLAUDE), text);
+      assert.equal(await clientSees([text], provider, FORMATS.CLAUDE, true), text);
       const trustedEmptyTurn = provider === "claude" || provider === "anthropic";
       const verdict = await validateResponseQuality(
         sse([text]),

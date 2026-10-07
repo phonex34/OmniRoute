@@ -133,6 +133,16 @@ export default function AddApiKeyModal({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [copiedCommandCodeField, setCopiedCommandCodeField] = useState<string | null>(null);
+  const [mode, setMode] = useState<"single" | "bulk">("single");
+  const [bulkText, setBulkText] = useState("");
+  const [bulkValidateKeys, setBulkValidateKeys] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{
+    success: number;
+    failed: number;
+    total: number;
+    errors: Array<{ index: number; name: string; message: string }>;
+  } | null>(null);
+  const [bulkWarnings, setBulkWarnings] = useState<string[]>([]);
   const resetOpenRouterPreset = openRouterPreset.setValue;
   const wasOpenRef = useRef(false);
   useEffect(() => {
@@ -175,16 +185,6 @@ export default function AddApiKeyModal({
     showsRegion,
   ]);
   const bulkSupported = supportsBulkApiKey(provider);
-  const [mode, setMode] = useState<"single" | "bulk">("single");
-  const [bulkText, setBulkText] = useState("");
-  const [bulkValidateKeys, setBulkValidateKeys] = useState(false);
-  const [bulkResult, setBulkResult] = useState<{
-    success: number;
-    failed: number;
-    total: number;
-    errors: Array<{ index: number; name: string; message: string }>;
-  } | null>(null);
-  const [bulkWarnings, setBulkWarnings] = useState<string[]>([]);
   const apiCredentialLabel = isModal
     ? providerText(t, "modalTokenIdLabel", "Token ID")
     : isAwsPolly

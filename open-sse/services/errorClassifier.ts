@@ -29,10 +29,10 @@ const LEGIT_EMPTY_OPENAI_FINISH = new Set(["length", "tool_calls", "content_filt
 // consulted (stream.ts `successfulResponsesCompletion`); incomplete, failed and
 // unterminated turns never reach a normal stop. Estimated usage never trusts.
 const TRUSTED_EMPTY_STOP_PROVIDERS: Record<string, true> = { antigravity: true, codex: true };
-// Codex must report generated output (live silent turns: output_tokens 4). A
-// usage-less or zero-output shell is not a model answer and keeps failing over.
-// Streams additionally require a successful upstream Responses terminal; chat
-// and non-stream shapes carry no `final_answer` marker, so this is their gate.
+// Without authenticated native execution provenance, Codex must report generated
+// output (live silent turns: output_tokens 4). Usage-less or zero-output shells
+// retain the conservative guard. Callers with provenance separately accept an
+// ordinary native terminal; translated or synthetic stops cannot grant it.
 const REQUIRES_GENERATED_OUTPUT: Record<string, true> = { codex: true };
 const NORMAL_STOP_REASONS: Record<string, true> = {
   stop: true,
@@ -44,8 +44,8 @@ const NORMAL_STOP_REASONS: Record<string, true> = {
  * True when an empty completion is a legitimate answer rather than a fake
  * success: an explicitly allowlisted provider ended the turn normally and its
  * usage was not locally estimated.
- * Shared by the non-streaming check, the stream content watcher, and the
- * combo quality gate so all three paths apply one rule.
+ * Shared fallback for callers without authenticated native execution provenance.
+ * Proven native ordinary completions are checked separately by those callers.
  */
 export function isTrustedEmptyStop(
   provider: string | null | undefined,
@@ -117,8 +117,10 @@ export function isEmptyContentResponse(
     });
     return (
       !hasOutput &&
-      !(isSuccessfulResponsesCompletion(body) &&
-        (trustedEmptyTurn || isTrustedEmptyStop(provider, "stop", body.usage)))
+      !(
+        isSuccessfulResponsesCompletion(body) &&
+        (trustedEmptyTurn || isTrustedEmptyStop(provider, "stop", body.usage))
+      )
     );
   }
 
@@ -157,7 +159,10 @@ export function isEmptyContentResponse(
     // #14160: on a trusted first-party API, an empty completion that stopped
     // normally is a valid answer — pass it through as a 200 instead of
     // rewriting it into a synthetic 502.
-    if ((trustedEmptyTurn && finishReason === "stop") || isTrustedEmptyStop(provider, finishReason, body.usage)) {
+    if (
+      (trustedEmptyTurn && finishReason === "stop") ||
+      isTrustedEmptyStop(provider, finishReason, body.usage)
+    ) {
       return false;
     }
 
