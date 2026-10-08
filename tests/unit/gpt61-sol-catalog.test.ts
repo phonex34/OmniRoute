@@ -97,7 +97,12 @@ test("GPT-6.1 Sol honors discovered Codex defaults without changing explicit eff
       },
     },
   };
-  const defaulted = executor.transformRequest(MODEL, { model: MODEL, input: [] }, false, credentials) as ResponsesBody;
+  const defaulted = executor.transformRequest(
+    MODEL,
+    { model: MODEL, input: [] },
+    false,
+    credentials
+  ) as ResponsesBody;
   assert.equal(defaulted.reasoning.effort, "low");
   const explicit = executor.transformRequest(
     MODEL,

@@ -57,6 +57,7 @@ interface UsageCostRow {
   model: string | null;
   serviceTier: string | null;
   promptTokens: number | null;
+  pricingInputTokens: number | null;
   completionTokens: number | null;
   cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
@@ -402,6 +403,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
         LOWER(provider) as provider,
         LOWER(model) as model,
         COALESCE(NULLIF(service_tier, ''), 'standard') as serviceTier,
+        COALESCE(tokens_input, 0) as pricingInputTokens,
         COALESCE(SUM(tokens_input), 0) as promptTokens,
         COALESCE(SUM(tokens_output), 0) as completionTokens,
         COALESCE(SUM(tokens_cache_read), 0) as cacheReadTokens,
@@ -411,7 +413,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
       WHERE api_key_id = @apiKeyId
         AND timestamp >= @sinceIso
         AND success = 1
-      GROUP BY LOWER(provider), LOWER(model), serviceTier
+      GROUP BY LOWER(provider), LOWER(model), serviceTier, COALESCE(tokens_input, 0)
     `
     )
     .all({ apiKeyId, sinceIso }) as UsageCostRow[];
@@ -437,6 +439,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
         provider,
         model,
         serviceTier: row.serviceTier || "standard",
+        pricingInputTokens: toNumber(row.pricingInputTokens),
       }
     );
     if (!priced) {
@@ -554,6 +557,12 @@ function buildUsageLimitExceededMessage(
   options: { showUsd?: boolean } = {}
 ): string {
   const showUsd = options.showUsd !== false;
+  const dailyUnpriced = status.dailyExceeded && status.dailyHasUnpricedUsage;
+  const weeklyUnpriced = status.weeklyExceeded && status.weeklyHasUnpricedUsage;
+  if (dailyUnpriced || weeklyUnpriced) {
+    const window = dailyUnpriced ? (weeklyUnpriced ? "daily and weekly" : "daily") : "weekly";
+    return `This API key is blocked because pricing is missing for usage in its ${window} quota window. Spend cannot be verified safely. Ask the administrator to configure pricing for the provider/model entries in this key's usage history. Retrying or changing models will not resolve the missing pricing.`;
+  }
   if (status.dailyExceeded && status.dailyLimitUsd !== null) {
     const percent = formatUsagePercent(getUsagePercent(status.dailySpentUsd, status.dailyLimitUsd));
     if (!showUsd) {
@@ -591,13 +600,18 @@ export function buildApiKeyUsageLimitRejection(
   options: { showUsd?: boolean } = {}
 ): Response {
   const message = sanitizeErrorMessage(buildUsageLimitExceededMessage(status, now, options));
-  // Whichever window actually tripped drives the reset timing below (daily is
-  // checked first, matching buildUsageLimitExceededMessage's own precedence).
-  const trippedResetAtIso = status.dailyExceeded
-    ? status.dailyResetAtIso
-    : status.weeklyExceeded
-      ? status.weeklyResetAtIso
-      : null;
+  const hasUnpricedUsage =
+    (status.dailyExceeded && status.dailyHasUnpricedUsage) ||
+    (status.weeklyExceeded && status.weeklyHasUnpricedUsage);
+  // Missing pricing is an accounting/configuration block, not a known reset
+  // time. A daily reset may still leave the same row in the weekly window.
+  const trippedResetAtIso = hasUnpricedUsage
+    ? null
+    : status.dailyExceeded
+      ? status.dailyResetAtIso
+      : status.weeklyExceeded
+        ? status.weeklyResetAtIso
+        : null;
   if (isAnthropicMessagesRequest(request)) {
     // Claude Code treats a non-400 /v1/messages error as an auth failure and triggers
     // a re-login prompt — this branch's status MUST stay 400 (see the "does not trigger
@@ -610,6 +624,7 @@ export function buildApiKeyUsageLimitRejection(
         error: {
           type: "invalid_request_error",
           message,
+          ...(hasUnpricedUsage ? { reason: "missing_pricing" } : {}),
           ...resolved,
         },
       }),
@@ -624,6 +639,7 @@ export function buildApiKeyUsageLimitRejection(
   // condition (every sibling budget/token/rate-limit check already uses it).
   return errorResponse(429, message, {
     code: "usage_limit_exceeded",
+    reason: hasUnpricedUsage ? "missing_pricing" : undefined,
     retryAfter: trippedResetAtIso,
   });
 }

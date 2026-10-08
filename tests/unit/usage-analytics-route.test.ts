@@ -9,6 +9,7 @@ process.env.DATA_DIR = TEST_DATA_DIR;
 const ORIGINAL_API_KEY_SECRET = process.env.API_KEY_SECRET;
 process.env.API_KEY_SECRET = "test-usage-analytics-secret";
 
+// DB and route modules must see the isolated DATA_DIR before initializing their singletons.
 const core = await import("../../src/lib/db/core.ts");
 const { updatePricing } = await import("@/lib/db/settings");
 const localDb = { updatePricing };
@@ -818,4 +819,108 @@ test("rollupUsageHistoryBeforeDate prices each request, not the day's summed tok
   // Retention must preserve the billed value. Archiving a day may not silently
   // discount it just because the day's requests were grouped before pricing.
   assertClose(archived.total_cost, expectedCost);
+});
+
+test("Haiku context pricing uses individual prompts in every analytics aggregation", async () => {
+  const provider = "anthropic-compatible-550e8400-e29b-41d4-a716-446655440010";
+  await providersDb.createProviderNode({
+    id: provider,
+    type: "anthropic-compatible",
+    name: "Official Anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+  });
+  const db = core.getDbInstance();
+  const insert = db.prepare(
+    `INSERT INTO usage_history
+       (provider, model, connection_id, api_key_id, api_key_name,
+        tokens_input, tokens_output, service_tier, success, latency_ms, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  // Together these short prompts exceed 100k, but neither request pays the long-context rate.
+  for (const input of [60_000, 60_000, 100_001]) {
+    insert.run(
+      provider,
+      "claude-haiku-5-5",
+      "haiku-connection",
+      "haiku-key",
+      "Haiku Key",
+      input,
+      0,
+      "standard",
+      1,
+      200,
+      new Date().toISOString()
+    );
+  }
+  const response = await analyticsRoute.GET(
+    makeRequest("http://localhost/api/usage/analytics?presets=1d")
+  );
+  const body = await response.json();
+  const expectedCost = 0.006 + 0.006 + 0.0500005;
+  assert.equal(response.status, 200);
+  assert.equal(body.summary.totalRequests, 3);
+  assert.equal(body.summary.totalTokens, 220_001);
+  assertClose(body.summary.totalCost, expectedCost);
+  for (const section of [
+    body.dailyTrend,
+    body.byModel,
+    body.byProvider,
+    body.byAccount,
+    body.byApiKey,
+    body.byServiceTier,
+  ]) {
+    assert.equal(section.length, 1, "pricing groups must not duplicate public analytics rows");
+    assertClose(section[0].cost, expectedCost);
+  }
+  assert.equal(body.byApiKey[0].requests, 3);
+  assert.equal(body.byModel[0].requests, 3);
+  assertClose(body.presetSummaries["1d"].totalCost, expectedCost);
+});
+
+test("unknown custom OpenAI models use the same estimated price in analytics and budgets", async () => {
+  const provider = "openai-compatible-550e8400-e29b-41d4-a716-446655440011";
+  await providersDb.createProviderNode({
+    id: provider,
+    type: "openai-compatible",
+    name: "Private Gateway",
+    baseUrl: "https://proxy.example.com/v1",
+  });
+  core
+    .getDbInstance()
+    .prepare(
+      `INSERT INTO usage_history
+       (provider, model, connection_id, api_key_id, api_key_name,
+        tokens_input, tokens_output, service_tier, success, latency_ms, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      provider,
+      "unpublished-private-model",
+      "private-connection",
+      "private-key",
+      "Private Key",
+      1_000_000,
+      1_000_000,
+      "standard",
+      1,
+      200,
+      new Date().toISOString()
+    );
+  const response = await analyticsRoute.GET(
+    makeRequest("http://localhost/api/usage/analytics?presets=1d")
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assertClose(body.summary.totalCost, 12);
+  for (const section of [
+    body.dailyTrend,
+    body.byModel,
+    body.byProvider,
+    body.byAccount,
+    body.byApiKey,
+    body.byServiceTier,
+  ]) {
+    assertClose(section[0].cost, 12);
+  }
+  assertClose(body.presetSummaries["1d"].totalCost, 12);
 });

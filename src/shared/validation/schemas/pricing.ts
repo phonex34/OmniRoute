@@ -21,6 +21,18 @@ export const pricingFieldsSchema = z
     cached: z.number().min(0).optional(),
     reasoning: z.number().min(0).optional(),
     cache_creation: z.number().min(0).optional(),
+    long_context: z
+      .object({
+        threshold: z.number().int().nonnegative(),
+        input: z.number().nonnegative(),
+        output: z.number().nonnegative(),
+        cached: z.number().nonnegative().optional(),
+        reasoning: z.number().nonnegative().optional(),
+        cache_creation: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     // Written by pricingSync alongside the token fields and echoed back by the
     // dashboard's GET → PATCH round-trip; strict() would otherwise reject the
     // API's own output with an unrecognized-keys 400 (#12494).

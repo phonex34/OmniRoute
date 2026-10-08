@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
-import { IMAGE_PROVIDERS } from "@omniroute/open-sse/config/imageRegistry.ts";
 import { VIDEO_PROVIDERS } from "@omniroute/open-sse/config/videoRegistry.ts";
 import { MUSIC_PROVIDERS } from "@omniroute/open-sse/config/musicRegistry.ts";
 import {
@@ -19,7 +18,6 @@ type GenerationResult = {
   timestamp: number;
   audioUrl?: string;
 };
-const IMAGE_PROVIDER_MODELS = toProviderModels(IMAGE_PROVIDERS);
 const VIDEO_PROVIDER_MODELS = toProviderModels(VIDEO_PROVIDERS);
 const MUSIC_PROVIDER_MODELS = toProviderModels(MUSIC_PROVIDERS);
 const SPEECH_PROVIDER_MODELS = toProviderModels(AUDIO_SPEECH_PROVIDERS);
@@ -71,17 +69,6 @@ const MODALITY_CONFIG: Record<
     color: "from-indigo-500 to-blue-500",
   },
 };
-
-// Provider+model registry derived from runtime registries to avoid dashboard drift
-const PROVIDER_MODELS: Record<Modality, ProviderModelGroup[]> = {
-  image: IMAGE_PROVIDER_MODELS,
-  video: VIDEO_PROVIDER_MODELS,
-  music: MUSIC_PROVIDER_MODELS,
-  speech: SPEECH_PROVIDER_MODELS,
-  transcription: TRANSCRIPTION_PROVIDER_MODELS,
-};
-const INITIAL_IMAGE_PROVIDER = PROVIDER_MODELS.image[0];
-const INITIAL_IMAGE_MODEL = INITIAL_IMAGE_PROVIDER?.models[0];
 
 // Voice presets per TTS provider
 const VOICE_PRESETS: Record<string, { id: string; label: string }[]> = {
@@ -417,16 +404,28 @@ function ImageResults({ data }: { data: any }) {
   );
 }
 
-export default function MediaPageClient() {
+export default function MediaPageClient({
+  imageProviderModels,
+}: {
+  imageProviderModels: ProviderModelGroup[];
+}) {
+  // Only serialized image metadata crosses from the server registry into this client.
+  const PROVIDER_MODELS: Record<Modality, ProviderModelGroup[]> = {
+    image: imageProviderModels,
+    video: VIDEO_PROVIDER_MODELS,
+    music: MUSIC_PROVIDER_MODELS,
+    speech: SPEECH_PROVIDER_MODELS,
+    transcription: TRANSCRIPTION_PROVIDER_MODELS,
+  };
+  const initialImageProvider = imageProviderModels[0];
+  const initialImageModel = initialImageProvider?.models[0];
   const t = useTranslations("media");
   const [activeTab, setActiveTab] = useState<Modality>("image");
   const [prompt, setPrompt] = useState("");
 
   // Selected provider and model per modality
-  const [selectedProvider, setSelectedProvider] = useState<string>(
-    INITIAL_IMAGE_PROVIDER?.id ?? ""
-  );
-  const [selectedModel, setSelectedModel] = useState<string>(INITIAL_IMAGE_MODEL?.id ?? "");
+  const [selectedProvider, setSelectedProvider] = useState<string>(initialImageProvider?.id ?? "");
+  const [selectedModel, setSelectedModel] = useState<string>(initialImageModel?.id ?? "");
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<GenerationResult | null>(null);

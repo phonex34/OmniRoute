@@ -505,6 +505,8 @@ export async function validateProviderApiKey({
         baseUrl: requestBaseUrl,
         modelId,
         headers: requestHeaders,
+        modelsUrl:
+          addModelsSuffix(baseUrl) === entry.testKeyModelsUrl ? entry.testKeyModelsUrl : undefined,
         providerSpecificData,
         isLocal,
       });

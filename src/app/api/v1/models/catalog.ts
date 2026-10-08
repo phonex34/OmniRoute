@@ -400,14 +400,9 @@ async function buildUnifiedModelsResponseCore(
     const nodeIdToProviderType: Record<string, string> = {};
     const nodeApiTypes = indexNodeApiTypes(providerNodes);
     for (const node of providerNodes) {
-      const resolvedPrefix =
-        node.prefix?.trim() ||
-        node.name
-          ?.trim()
-          ?.toLowerCase()
-          ?.replace(/\s+/g, "-")
-          ?.replace(/[^a-z0-9-]/g, "") ||
-        null;
+      // Display names are not routing aliases. Without a configured prefix,
+      // publish the node id, which the runtime resolver accepts directly.
+      const resolvedPrefix = node.prefix?.trim() || null;
       if (resolvedPrefix) {
         providerIdToPrefix[node.id] = resolvedPrefix;
       }
