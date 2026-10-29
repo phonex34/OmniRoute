@@ -19,7 +19,7 @@ export type PricingSourceMap = Record<string, Record<string, PricingSource>>;
 // Operator-approved estimate for unknown compatible-node models: Sonnet 5.5
 // API rates, not a claim about the upstream model's actual billed price.
 // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-08).
-const CUSTOM_MODEL_FALLBACK_PRICING = Object.freeze({
+const CUSTOM_MODEL_FALLBACK_PRICING: JsonRecord = Object.freeze({
   input: 2,
   output: 10,
   cached: 0.1,
