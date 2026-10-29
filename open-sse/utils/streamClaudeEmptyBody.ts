@@ -38,16 +38,21 @@ const CLEAN_EMPTY_STOP_REASONS: Record<string, true> = {
 
 /**
  * Claude SSE clean-stop policy, not a non-streaming or OpenAI exemption.
- * Codex empty stops require the shared trusted-stop policy.
+ * Codex empty stops need authenticated native execution (`nativeTrusted`) or
+ * the shared trusted-stop policy: an ordinary empty end_turn from a proven
+ * Codex execution is a successful turn (Anthropic stop-reason semantics), and
+ * the client decides whether to continue.
  * Estimated Antigravity usage is never trusted.
  */
 export function isCleanEmptyClaudeStop(
   stopReason: unknown,
   provider?: string | null,
-  usage?: unknown
+  usage?: unknown,
+  nativeTrusted = false
 ): boolean {
   if (provider === "antigravity" && isEstimatedUsage(usage)) return false;
-  if (provider === "codex" && !isTrustedEmptyStop(provider, stopReason, usage)) return false;
+  if (provider === "codex" && !nativeTrusted && !isTrustedEmptyStop(provider, stopReason, usage))
+    return false;
   return typeof stopReason === "string" && CLEAN_EMPTY_STOP_REASONS[stopReason] === true;
 }
 

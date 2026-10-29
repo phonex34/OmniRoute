@@ -1,3 +1,5 @@
+import { isReservedProviderPrefix } from "@/shared/constants/reservedProviderPrefixes";
+
 /**
  * Model-id prefix stacking guards for compatible-provider nodes.
  *
@@ -53,6 +55,11 @@ export function collapseProviderPrefix(
  * Resolve a compatible-provider node's display prefix the same way the
  * `/v1/models` catalog does: the configured `prefix`, else the name slugified
  * to the same charset, else null.
+ *
+ * The name slug is only a display fallback, so it never claims a reserved
+ * built-in prefix: a node named "Anthropic" without a prefix would otherwise
+ * publish `anthropic/<model>`, which the runtime routes to the built-in
+ * provider. Such nodes resolve to null and keep their routable node id.
  */
 export function resolveProviderNodePrefix(
   node: Record<string, unknown> | null | undefined
@@ -63,5 +70,6 @@ export function resolveProviderNodePrefix(
   const name = typeof node.name === "string" ? node.name.trim().toLowerCase() : "";
   if (!name) return null;
   const slug = name.replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-  return slug || null;
+  if (!slug || isReservedProviderPrefix(slug)) return null;
+  return slug;
 }

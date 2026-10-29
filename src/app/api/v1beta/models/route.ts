@@ -12,6 +12,7 @@ import { getResolvedModelCapabilities } from "@/lib/modelCapabilities";
 import { getSyncedCapabilities } from "@/lib/modelsDevSync";
 import { mergeCustomModelMetadata } from "@/lib/providers/modelMetadataPrecedence";
 import { getProviderPrefixIndex } from "@/lib/providerNodePrefixes";
+import { resolveProviderNodePrefix } from "@/shared/utils/modelIdPrefix";
 import { getModelCatalogAuthRejection } from "../../v1/models/catalogRequest";
 
 /**
@@ -56,14 +57,7 @@ async function getPublicProviderIdResolver(): Promise<(providerId: string) => st
   }
   const providerIdToPrefix: Record<string, string> = {};
   for (const node of providerNodes) {
-    const resolvedPrefix =
-      node.prefix?.trim() ||
-      node.name
-        ?.trim()
-        ?.toLowerCase()
-        ?.replace(/\s+/g, "-")
-        ?.replace(/[^a-z0-9-]/g, "") ||
-      null;
+    const resolvedPrefix = resolveProviderNodePrefix(node);
     if (resolvedPrefix && node.id) providerIdToPrefix[node.id] = resolvedPrefix;
   }
   return (providerId: string) => providerIdToPrefix[providerId] || providerId;

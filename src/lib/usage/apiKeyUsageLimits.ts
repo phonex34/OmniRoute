@@ -105,6 +105,7 @@ interface UnpricedLimitRow {
   model: string | null;
   serviceTier: string | null;
   providerCostUsd: number | null;
+  billingUnit: string | null;
   tokensInput: number | null;
   tokensOutput: number | null;
   tokensCacheRead: number | null;
@@ -535,6 +536,10 @@ async function priceLimitRow(
   if (row.providerCostUsd !== null && row.providerCostUsd !== undefined) {
     return { costUsd: toNumber(row.providerCostUsd), outcome: "priced" };
   }
+  // A non-token billing unit (OCR page, embedding batch) that stored no cost was
+  // not priced anywhere: repricing its zero tokens as a $0 request would claim the
+  // call was free. Stays unpriced until a price for that unit exists.
+  if (row.billingUnit) return { costUsd: 0, outcome: "unpriced" };
   const tokensInput = toNumber(row.tokensInput);
   const { costUsd, priced, failed } = await calculateCostDetailed(
     provider,
@@ -598,6 +603,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
         LOWER(model) AS model,
         COALESCE(NULLIF(service_tier, ''), 'standard') AS serviceTier,
         COALESCE(provider_cost_usd, calculated_cost_usd) AS providerCostUsd,
+        billing_unit AS billingUnit,
         tokens_input AS tokensInput,
         tokens_output AS tokensOutput,
         tokens_cache_read AS tokensCacheRead,

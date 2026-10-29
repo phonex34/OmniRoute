@@ -368,21 +368,23 @@ function trackUsageFromChunk(chunk, state) {
   // Reasoning is already included in output_tokens — never add it on top. Keep the
   // count on the shared state so streaming usage accounting (tokens_reasoning) does
   // not lose it on this pivot; message_delta strips it from the client payload.
-  // The output_tokens_details breakdown stays client-visible: downstream empty-turn
-  // checks need this provenance when Codex's encrypted reasoning has no visible text.
   if (reasoningTokens > 0) {
     state.usage.reasoning_tokens = reasoningTokens;
-    state.usage.output_tokens_details = { reasoning_tokens: reasoningTokens };
   }
 }
 
 // Client-facing Claude usage: the accounting-only reasoning_tokens is not part of
-// the Anthropic usage shape.
-function toClaudeClientUsage(usage) {
+// the Anthropic usage shape (#4536). A turn that opened no content block keeps the
+// count as `output_tokens_details`: downstream empty-turn checks need this provenance
+// when Codex's encrypted reasoning produced no visible text.
+function toClaudeClientUsage(usage, state) {
   if (!usage) return { input_tokens: 0, output_tokens: 0 };
   if (usage.reasoning_tokens === undefined) return usage;
   const clientUsage = { ...usage };
   delete clientUsage.reasoning_tokens;
+  if (!state.nextBlockIndex && usage.reasoning_tokens > 0) {
+    clientUsage.output_tokens_details = { reasoning_tokens: usage.reasoning_tokens };
+  }
   return clientUsage;
 }
 
@@ -954,7 +956,7 @@ export function openaiToClaudeResponse(chunk, state) {
     state.finishReason = overrideFinishReason;
 
     // Use tracked usage (will be estimated in stream.js if not valid)
-    const finalUsage = toClaudeClientUsage(state.usage);
+    const finalUsage = toClaudeClientUsage(state.usage, state);
     results.push({
       type: "message_delta",
       delta: { stop_reason: openAIFinishReasonToClaudeStopReason(overrideFinishReason) },
