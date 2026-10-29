@@ -56,9 +56,7 @@ function executionProtocol(response: Response, requestUrl: string): NativeProtoc
     if (azure) return azure;
     // These are protocol-native endpoints already used by the executors. A
     // compatible node or overridden base URL does not inherit their policy.
-    // Codex empty completions retain the release failure guard even on its
-    // authenticated native endpoint; a normal terminal is not usable output.
-    for (const id of ["openai", "anthropic", "openrouter"]) {
+    for (const id of ["openai", "anthropic", "codex", "openrouter"]) {
       const entry = getRegistryEntry(id);
       if (!entry?.baseUrl) continue;
       const expected = new URL(entry.baseUrl);
