@@ -105,7 +105,6 @@ interface UnpricedLimitRow {
   model: string | null;
   serviceTier: string | null;
   providerCostUsd: number | null;
-  /** Non-token unit (OCR page, image, ...); without a stored cost it has no tariff (#19325). */
   billingUnit: string | null;
   tokensInput: number | null;
   tokensOutput: number | null;
@@ -537,14 +536,10 @@ async function priceLimitRow(
   if (row.providerCostUsd !== null && row.providerCostUsd !== undefined) {
     return { costUsd: toNumber(row.providerCostUsd), outcome: "priced" };
   }
-  // Unit-billed rows (#19325) without a stored cost cannot be priced from tokens.
-  if (row.billingUnit !== null && row.billingUnit !== undefined) {
-    console.warn(
-      `[apiKeyUsageLimits] no unit tariff for ${provider}/${model} (${row.billingUnit}) — ` +
-        "usage counted as $0 (#12341, #19325)"
-    );
-    return { costUsd: 0, outcome: "unpriced" };
-  }
+  // A non-token billing unit (OCR page, embedding batch) that stored no cost was
+  // not priced anywhere: repricing its zero tokens as a $0 request would claim the
+  // call was free. Stays unpriced until a price for that unit exists.
+  if (row.billingUnit) return { costUsd: 0, outcome: "unpriced" };
   const tokensInput = toNumber(row.tokensInput);
   const { costUsd, priced, failed } = await calculateCostDetailed(
     provider,
