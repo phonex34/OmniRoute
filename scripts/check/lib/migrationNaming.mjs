@@ -36,6 +36,14 @@ export const LEGACY_MIGRATION_MIN = 1;
 export const LEGACY_MIGRATION_RE = /^(\d{3})_(.+)\.sql$/;
 
 /**
+ * Slot exclusivo do fork: `NNNx_descricao.sql` (letra depois do slot upstream), ex.:
+ * `214a_usage_history_limit_cost.sql`. Congelado como o formato antigo — o ledger de
+ * quem já rodou o fork guarda a versão `214a`, então renomear reaplicaria a migration
+ * (ALTER duplicado). Nenhuma migration NOVA usa este formato: elas usam o carimbo.
+ */
+export const FORK_SLOT_MIGRATION_RE = /^(\d{3})([a-z])_(.+)\.sql$/;
+
+/**
  * Formato novo: carimbo UTC de 14 dígitos + descrição snake_case minúscula que começa
  * com letra. Começar com letra mantém o invariante de #17186 (o `name` gravado no ledger
  * nunca começa com dígito) e impede nomes ambíguos como `20261113120000_239_x.sql`.
@@ -178,7 +186,7 @@ export function normalizeMigrationDescription(text) {
  * `not-sql`, `legacy-zero`, `legacy-after-cut`, `no-prefix`, `prefix-length`, `separator`,
  * `description`, `description-length`, `bad-date`, `before-cut`, `future`, `format`.
  *
- * @returns {{ kind: "legacy", version: string, value: number, description: string }
+ * @returns {{ kind: "legacy", version: string, value: number, description: string, forkSlot?: true }
  *   | { kind: "timestamp", version: string, value: number, description: string, date: Date }
  *   | { kind: "invalid", code: string, reason: string }}
  */
@@ -218,6 +226,36 @@ export function classifyMigrationFilename(filename, options = {}) {
       };
     }
     return { kind: "legacy", version: legacy[1], value, description: legacy[2] };
+  }
+
+  // Slot do fork (`214a`): mesma faixa numérica das antigas, versão = `NNN` + letra.
+  const forkSlot = filename.match(FORK_SLOT_MIGRATION_RE);
+  if (forkSlot) {
+    const value = Number.parseInt(forkSlot[1], 10);
+    if (value < 1) {
+      return {
+        kind: "invalid",
+        code: "legacy-zero",
+        reason: "slot de fork sobre o número antigo 000, que não existe",
+      };
+    }
+    if (value > legacyMax) {
+      return {
+        kind: "invalid",
+        code: "legacy-after-cut",
+        reason:
+          `slot de fork sobre ${forkSlot[1]} depois do corte ` +
+          `(LEGACY_MIGRATION_MAX=${legacyMax}): migrations novas usam ` +
+          `YYYYMMDDHHMMSS_descricao.sql`,
+      };
+    }
+    return {
+      kind: "legacy",
+      version: `${forkSlot[1]}${forkSlot[2]}`,
+      value,
+      description: forkSlot[3],
+      forkSlot: true,
+    };
   }
 
   const prefix = filename.match(/^(\d+)(.*)$/);
