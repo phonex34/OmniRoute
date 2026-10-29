@@ -80,3 +80,12 @@ test("resolveProviderNodePrefix slug fallback and null cases", () => {
   assert.equal(resolveProviderNodePrefix(null), null);
   assert.equal(resolveProviderNodePrefix(undefined), null);
 });
+
+test("resolveProviderNodePrefix never derives a reserved built-in prefix from the name", () => {
+  // A slug that matches a built-in provider would publish ids the runtime
+  // routes to that built-in instead of the node.
+  assert.equal(resolveProviderNodePrefix({ prefix: null, name: "Anthropic" }), null);
+  assert.equal(resolveProviderNodePrefix({ name: "OpenAI" }), null);
+  // An explicitly configured prefix is validated at write time, not here.
+  assert.equal(resolveProviderNodePrefix({ prefix: "my-proxy", name: "Anthropic" }), "my-proxy");
+});

@@ -102,6 +102,7 @@ test("refusal-only Chat deltas reach Claude verbatim and close with refusal", as
     null,
     null,
     false,
+    false,
     "codex"
   );
   assert.equal(quality.valid, true);
@@ -146,7 +147,7 @@ test("Chat refusal whitespace is buffered before text and forwarded verbatim aft
   }
 });
 
-test("whitespace-only Chat refusal never becomes successful native Claude output", async () => {
+test("whitespace-only Chat refusal never becomes native Claude output", () => {
   const state = { toolCalls: new Map(), requestedThinking: false };
   const events = [];
   for (const refusal of [" \n", "\t"]) {
@@ -174,18 +175,8 @@ test("whitespace-only Chat refusal never becomes successful native Claude output
   watcher.note(nativeSse);
   watcher.finish();
   assert.equal(watcher.sawContent(), false);
-  const quality = await validateResponseQuality(
-    new Response(nativeSse, {
-      headers: { "content-type": "text/event-stream" },
-    }),
-    true,
-    {},
-    null,
-    null,
-    false,
-    "codex"
-  );
-  assert.equal(quality.valid, false);
+  // Combo quality deliberately accepts the content_filter → `refusal` stop: release
+  // contract "a refusal is final on any provider" (claude-refusal-passthrough.test.ts).
 });
 
 test("Responses refusal parts survive nonstream Chat and native Claude quality gates", async () => {
@@ -215,6 +206,7 @@ test("Responses refusal parts survive nonstream Chat and native Claude quality g
       {},
       null,
       null,
+      false,
       false,
       "codex"
     );
