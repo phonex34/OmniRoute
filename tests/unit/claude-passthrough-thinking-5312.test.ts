@@ -115,12 +115,13 @@ test("DROPS an empty-text thinking block with no valid signature (#5108 shape)",
   assert.equal(content[0].type, "text");
 });
 
-test("DROPS redacted_thinking blocks (opaque data, unverifiable)", () => {
+test("KEEPS redacted_thinking with data verbatim; DROPS payload-less redacted_thinking (#12917)", () => {
   const messages = [
     {
       role: "assistant",
       content: [
         { type: "redacted_thinking", data: "SOME_DATA" },
+        { type: "redacted_thinking" },
         { type: "text", text: "hi" },
       ],
     },
@@ -133,9 +134,10 @@ test("DROPS redacted_thinking blocks (opaque data, unverifiable)", () => {
     "claude-sonnet-4-6"
   ) as typeof messages;
 
-  const content = out[0].content as Array<Record<string, unknown>>;
-  assert.equal(content.length, 1);
-  assert.equal(content[0].type, "text");
+  assert.deepEqual(out[0].content, [
+    { type: "redacted_thinking", data: "SOME_DATA" },
+    { type: "text", text: "hi" },
+  ]);
 });
 
 test("KEEPS matching-model thinking on the LATEST assistant turn (verbatim)", () => {
