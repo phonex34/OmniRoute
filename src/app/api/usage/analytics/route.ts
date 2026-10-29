@@ -427,7 +427,7 @@ function computeUsageRowCost(
         model,
         serviceTier,
         flatRateAsZero,
-        pricingInputTokens: toNumber(row.pricingInputTokens),
+        pricingInputTokens: toNumber(r.pricingInputTokens),
       }
     )
   );
@@ -658,19 +658,16 @@ async function computeAnalyticsResponse(
     if (searchParams.get("view") === "apiKeys") {
       const apiKeyTotalsRows = getApiKeyTotalsRows(apiKeyWhereClause, params);
       await warmCompatiblePricing(apiKeyTotalsRows);
-      const byApiKey = buildApiKeyTotals(
-        apiKeyTotalsRows,
-        apiKeys,
-        (row) =>
-          computeUsageRowCost(
-            row as unknown as Record<string, unknown>,
-            pricingByProvider,
-            PROVIDER_ID_TO_ALIAS,
-            normalizeModelName,
-            computeCostFromPricing,
-            !includeFlatRateEstimates,
-            pricingContext
-          )
+      const byApiKey = buildApiKeyTotals(apiKeyTotalsRows, apiKeys, (row) =>
+        computeUsageRowCost(
+          row as unknown as Record<string, unknown>,
+          pricingByProvider,
+          PROVIDER_ID_TO_ALIAS,
+          normalizeModelName,
+          computeCostFromPricing,
+          !includeFlatRateEstimates,
+          pricingContext
+        )
       );
       return NextResponse.json({ byApiKey });
     }

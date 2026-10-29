@@ -1624,6 +1624,8 @@ function flushClaudeResponsesThinking(state) {
       .map(([, block]) => block),
     provider: state.provider,
     model: state.model,
+    // Signatures are org-scoped (#17324): the store refuses unbound entries.
+    connectionId: state.connectionId,
   });
 }
 
@@ -1710,8 +1712,11 @@ export function claudeToOpenAIResponsesResponse(chunk, state) {
       emitReasoningDelta(state, emit, delta.thinking);
     } else if (delta?.type === "signature_delta" && typeof delta.signature === "string") {
       const tracked = state.claudeResponsesThinkingBlocks.get(chunk.index);
-      if (tracked?.type === "thinking") tracked.signature += delta.signature;
-      state.reasoningEncryptedContent = delta.signature;
+      if (tracked?.type === "thinking") {
+        tracked.signature += delta.signature;
+        // signature_delta may arrive in several chunks; expose the complete signature.
+        state.reasoningEncryptedContent = tracked.signature;
+      }
     } else if (delta?.type === "text_delta" && typeof delta.text === "string") {
       if (state.reasoningId && !state.reasoningDone) closeReasoning(state, emit);
       emitTextContent(state, emit, chunk.index, delta.text);

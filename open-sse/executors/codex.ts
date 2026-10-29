@@ -61,7 +61,7 @@ import { inspectCodexSsePeek } from "./codex/ssePeekFailure.ts";
 import { normalizeCodexResponsesInput } from "../utils/responsesInputNormalization.ts";
 import { generateToolCallId } from "../translator/helpers/toolCallHelper.ts";
 import * as prl from "../utils/providerRequestLogging.ts";
-import * as nodeModule from "node:module";
+import { createRequire } from "module";
 import { loadDynamicModule } from "./codex/wreqLoader.ts";
 // Quota parsing/scheduling extracted to a pure leaf; re-exported for the
 // Codex account module and tests.
@@ -94,8 +94,7 @@ export { isCodexFreePlan, normalizeCodexTools } from "./codex/tools.ts";
 // Loading it eagerly crashes the server when the binary is missing (pnpm, Docker
 // Alpine, unsupported architectures). We lazy-load with try/catch to gracefully
 // fall back to HTTP transport when the WebSocket transport is unavailable.
-// Resolve from the deployed entrypoint, not a build-time import.meta.url path.
-const _wreqRequire = nodeModule.createRequire(process.argv[1] || process.cwd());
+const _wreqRequire = createRequire(import.meta.url);
 
 type WreqWebSocket = {
   send: (data: string) => void;
@@ -279,23 +278,6 @@ function convertSystemToDeveloperRole(body: Record<string, unknown>): void {
   }
 }
 
-/**
- * Strip server-generated item IDs from the input array.
- *
- * The Codex /codex/responses endpoint does not persist response items even when
- * store=true is sent. When proxy clients (e.g. OpenClaw) include response items
- * from previous turns in the input array, those items carry server-assigned IDs
- * (prefixed with "rs_", "fc_", "resp_", "msg_"). The Codex backend tries to
- * validate these IDs against its persistence store and returns 404 when the items
- * are not found (because store was effectively false).
- *
- * This function:
- *   1. Removes bare string references ("rs_abc123") from the input array
- *   2. Removes object items with type "item_reference" (explicit stored-item refs)
- *   3. Strips the "id" field from any object in input whose id matches a
- *      server-generated prefix (rs_, fc_, resp_, msg_) — so the content is
- *      preserved but the backend won't try to look it up
- */
 type CodexOpaqueReplayProvenance = {
   readonly model: string;
   readonly sessionId: string;
@@ -463,72 +445,19 @@ function isResponsesInputItem(value: unknown): value is ResponsesInputItem {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-export function stripStoredItemReferences(body: Record<string, unknown>): void {
-  if (Array.isArray(body.input) && body.input.length === 0) {
-    body.input = [
-      {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: "continue" }],
-      },
-    ];
-  }
-
-  if (!Array.isArray(body.input)) return;
-
-  const SERVER_ID_PATTERN = /^(rs|fc|resp|msg)_/;
-  let strippedCount = 0;
-
-  body.input = body.input.filter((item) => {
-    // Bare string references: "rs_abc123", "resp_abc123"
-    if (typeof item === "string" && SERVER_ID_PATTERN.test(item)) {
-      strippedCount++;
-      return false;
-    }
-
-    // Object references: { type: "item_reference", id: "rs_..." }
-    if (
-      item &&
-      typeof item === "object" &&
-      !Array.isArray(item) &&
-      (item as Record<string, unknown>).type === "item_reference"
-    ) {
-      strippedCount++;
-      return false;
-    }
-
-    // Reasoning blobs (encrypted_content) are unusable with store=false since
-    // previous_response_id is deleted — strip them to avoid wasting context
-    // tokens (O(n^2) growth across agentic turns).
-    if (
-      item &&
-      typeof item === "object" &&
-      !Array.isArray(item) &&
-      (item as Record<string, unknown>).type === "reasoning"
-    ) {
-      strippedCount++;
-      return false;
-    }
-
-    // Object items with server-generated IDs: strip the id field but keep the item.
-    // e.g. { id: "rs_...", type: "reasoning", summary: [...] } → keep content, remove id
-    // e.g. { id: "fc_...", type: "function_call", ... } → keep content, remove id
-    if (item && typeof item === "object" && !Array.isArray(item)) {
-      const record = item as Record<string, unknown>;
-      if (typeof record.id === "string" && SERVER_ID_PATTERN.test(record.id)) {
-        delete record.id;
-        strippedCount++;
-      }
-    }
-
-    return true;
-  });
-
-  if (strippedCount > 0) {
-    console.debug(
-      `[Codex] stripStoredItemReferences: sanitized ${strippedCount} server-generated ID(s) from input`
-    );
-  }
+/**
+ * Translated clients can end up with an empty Responses input once orphaned tool
+ * outputs are removed; Codex rejects an empty input, so continue the turn instead.
+ */
+function ensureCodexContinuationInput(body: Record<string, unknown>): void {
+  if (!Array.isArray(body.input) || body.input.length > 0) return;
+  body.input = [
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "continue" }],
+    },
+  ];
 }
 
 function stripOrphanedCodexFunctionCallOutputs(body: Record<string, unknown>): void {
@@ -1927,14 +1856,8 @@ export class CodexExecutor extends BaseExecutor {
       defaultFunctionStrict: nativeCodexPassthrough ? undefined : false,
     });
 
-    // Strip stored response item references (rs_, resp_, msg_ IDs) and unusable
-    // reasoning blobs from translated input. The /codex/responses endpoint does not
-    // persist responses even with store=true, so any references to previous response
-    // items would cause 404 errors. Skipped for native passthrough, which forwards
-    // the caller's Responses input (including opaque reasoning) untouched.
-    if (!nativeCodexPassthrough) {
-      stripStoredItemReferences(body);
-    }
+    // Codex opaque replay injection is a fork feature for translated clients only;
+    // caller-supplied input (ids, reasoning) is left to the shared input policy.
     const replayRecoveryContext = getCodexReplayRecoveryContext(bodyInput);
     if (
       replayRecoveryContext?.replayEnabled !== false &&
@@ -1953,9 +1876,7 @@ export class CodexExecutor extends BaseExecutor {
     repairMissingCodexToolCallOutputs(body);
     // Preserve the translated empty-input continuation fallback after orphan
     // outputs are removed; replay must see the caller's real output anchors first.
-    if (!nativeCodexPassthrough && Array.isArray(body.input) && body.input.length === 0) {
-      stripStoredItemReferences(body);
-    }
+    if (!nativeCodexPassthrough) ensureCodexContinuationInput(body);
 
     // Issue #806: Even for native passthrough, some clients (purist completions) might indiscriminately inject
     // a `messages` or `prompt` array which the strict Codex Responses schema rejects.
