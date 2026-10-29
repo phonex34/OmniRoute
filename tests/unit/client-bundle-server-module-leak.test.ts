@@ -59,6 +59,8 @@ const SOURCE_RE = /\.(tsx?|mjs|jsx?|cjs)$/;
  */
 const PATH_ALIASES: Array<[RegExp, string]> = [
   [/^@omniroute\/browser-pool$/, "packages/browser-pool/src"],
+  [/^@omniroute\/ui-kit$/, "packages/ui-kit/src"],
+  [/^@omniroute\/ui-kit\//, "packages/ui-kit/src/"],
   [/^@omniroute\/open-sse$/, "open-sse"],
   [/^@omniroute\/open-sse\//, "open-sse/"],
   [/^@\//, "src/"],

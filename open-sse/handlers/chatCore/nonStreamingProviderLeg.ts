@@ -1086,8 +1086,11 @@ export async function runNonStreamingProviderLeg(
   // -- Empty content -> family fallback (initial only) -------------------------
   // #14160: pass the provider so first-party APIs (antigravity) keep empty
   // completions with a normal stop reason as valid 200s instead of synthetic
-  // 502s feeding model lockout.
+  // 502s feeding model lockout. Responses-shaped bodies are left to the
+  // detectMalformedNonStream diagnostics in finishOk, which emit the
+  // `upstream_empty_response` code that same-owner retries (Muse) key on.
   if (
+    responseBody?.object !== "response" &&
     isEmptyContentResponse(responseBody, {
       provider,
       trustedEmptyTurn: hasTrustedEmptyTurn(executorResult.response),

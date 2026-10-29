@@ -21,6 +21,8 @@ test("Next resolves TypeScript aliases without spawning the compiler CLI", async
       "@omniroute/open-sse": ["./open-sse"],
       "@omniroute/open-sse/*": ["./open-sse/*"],
       "@omniroute/browser-pool": ["./packages/browser-pool/src"],
+      "@omniroute/ui-kit": ["./packages/ui-kit/src"],
+      "@omniroute/ui-kit/*": ["./packages/ui-kit/src/*"],
     });
   } finally {
     ChildProcess.prototype.spawn = originalSpawn;

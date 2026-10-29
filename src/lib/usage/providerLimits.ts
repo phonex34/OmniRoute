@@ -1472,7 +1472,11 @@ export async function syncAllProviderLimits(
 
   const recordChunk = (
     chunk: ProviderConnectionLike[],
-    results: PromiseSettledResult<{ connectionId: string; cache: ProviderLimitsCacheEntry }>[]
+    results: PromiseSettledResult<{
+      connectionId: string;
+      cache: ProviderLimitsCacheEntry;
+      failed: boolean;
+    }>[]
   ) => {
     results.forEach((result, index) => {
       const connectionId = chunk[index]?.id;
