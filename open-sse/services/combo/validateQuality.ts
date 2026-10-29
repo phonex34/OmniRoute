@@ -704,7 +704,7 @@ export async function validateResponseQuality(
               !sse.hasContentBlock &&
               (sse.stopReason === "refusal" ||
                 (permitsEmptyTurn() &&
-                  isCleanEmptyClaudeStop(sse.stopReason, provider, sse.usage)) ||
+                  isCleanEmptyClaudeStop(sse.stopReason, provider, sse.usage, true)) ||
                 (provider !== "claude" &&
                   provider !== "anthropic" &&
                   isTrustedEmptyStop(provider, sse.stopReason, sse.usage)))
@@ -997,7 +997,7 @@ export async function validateResponseQuality(
     provider === "codex" &&
     json.type === "message" &&
     Array.isArray(json.content) &&
-    isEmptyContentResponse(json, { provider })
+    isEmptyContentResponse(json, { provider, trustedEmptyTurn: permitsEmptyTurn() })
   ) {
     return { valid: false, reason: "empty_choices" };
   }
