@@ -1077,9 +1077,10 @@ async function handleChatImplementation(
   // suffixed pool name would miss its combo). The raw suffix is stashed on the body via
   // THINKING_SUFFIX_MARKER and re-applied per-target in chatCore (Point 2), so every
   // target in a pool — each possibly a different provider — gets its own thinking config.
+  // A name that exactly matches a stored combo (e.g. `literal [1m]`) is kept literal.
   {
     const { baseModel, rawSuffix } = splitThinkingSuffix(resolvedModelStr);
-    if (rawSuffix) {
+    if (rawSuffix && !(await getCombo(resolvedModelStr))) {
       resolvedModelStr = baseModel;
       body = { ...body, model: baseModel, [THINKING_SUFFIX_MARKER]: rawSuffix };
       log.info("THINKING-SUFFIX", `stripped "(${rawSuffix})" → ${baseModel} (stashed for targets)`);
