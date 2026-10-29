@@ -339,12 +339,21 @@ test("Responses client: end-to-end claude→responses stream then responses→cl
 });
 
 test("Responses client: direct stream capture retains signed and redacted blocks in order", () => {
-  const state = { ...initState(FORMATS.OPENAI_RESPONSES), provider: "claude" };
+  // Release #17324 contract: retained blocks are bound to the serving connection.
+  const state: Record<string, unknown> = {
+    ...(initState(FORMATS.OPENAI_RESPONSES) as Record<string, unknown>),
+    provider: "claude",
+    toolNameMap: new Map(),
+    connectionId: CONN,
+  };
   for (const event of claudeToolTurnEvents({ withRedacted: true })) {
     translateResponse(FORMATS.CLAUDE, FORMATS.OPENAI_RESPONSES, event, state);
   }
+  translateResponse(FORMATS.CLAUDE, FORMATS.OPENAI_RESPONSES, null, state);
   assert.deepEqual(
-    assistantTurn(translateChatTurn(chatHistory())).content.slice(0, 2).map(stripCacheControl),
+    assistantTurn(translateChatTurn(chatHistory(), { connectionId: CONN }))
+      .content.slice(0, 2)
+      .map(stripCacheControl),
     [
       { type: "thinking", thinking: THINKING_TEXT, signature: SIGNATURE },
       { type: "redacted_thinking", data: "REDACTED_OPAQUE_DATA" },
@@ -353,7 +362,12 @@ test("Responses client: direct stream capture retains signed and redacted blocks
 });
 
 test("Responses client: unsigned direct stream thinking is never stored", () => {
-  const state = { ...initState(FORMATS.OPENAI_RESPONSES), provider: "claude" };
+  const state: Record<string, unknown> = {
+    ...(initState(FORMATS.OPENAI_RESPONSES) as Record<string, unknown>),
+    provider: "claude",
+    toolNameMap: new Map(),
+    connectionId: CONN,
+  };
   for (const event of claudeToolTurnEvents({ withSignature: false })) {
     translateResponse(FORMATS.CLAUDE, FORMATS.OPENAI_RESPONSES, event, state);
   }

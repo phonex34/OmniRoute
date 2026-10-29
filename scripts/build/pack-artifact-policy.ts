@@ -74,7 +74,7 @@ export const APP_STAGING_ALLOWED_EXACT_PATHS: string[] = [
   "responses-ws-proxy.mjs",
   "bin/chatgpt-web-codex-mcp.mjs",
   "scripts/dev/sync-env.mjs",
-  "tls-options.mjs",
+  "scripts/dev/tls-options.mjs",
   "server.js",
   "server-ws.mjs",
   // #5452: dist/tls-options.mjs is copied by assembleStandalone (EXTRA_MODULE_ENTRIES)
