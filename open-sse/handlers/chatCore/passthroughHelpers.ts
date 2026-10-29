@@ -11,7 +11,10 @@ import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingS
 import { isResponsesEndpointPath } from "../../utils/responsesEndpoint.ts";
 import { mergeClientAnthropicBeta } from "../../config/anthropicHeaders.ts";
 import { getHeaderValueCaseInsensitive } from "./headers.ts";
-import { isClaudeSignatureReplaySafeForModel } from "../../utils/claudeThinkingSignature.ts";
+import {
+  isClaudeSignatureReplaySafeForModel,
+  isStructurallyValidClaudeThinkingSignature,
+} from "../../utils/claudeThinkingSignature.ts";
 
 export { isResponsesEndpointPath };
 
@@ -531,36 +534,33 @@ export async function executeWithAnthropicThinkingSignatureRecovery<T>(args: {
   };
 }
 
+function isCrossModelClaudeThinkingBlock(
+  block: Record<string, unknown>,
+  targetModel: string | null | undefined
+): boolean {
+  return (
+    block.type === "thinking" &&
+    isStructurallyValidClaudeThinkingSignature(block.signature) &&
+    !isClaudeSignatureReplaySafeForModel(block.signature, targetModel)
+  );
+}
+
 /**
- * Sanitize replayed `thinking` blocks on the Anthropic-native Claude OAuth passthrough
- * using CLIProxyAPI's validate-then-preserve-or-drop strategy (internal/signature):
- * KEEP a thinking block when its signature is safe to replay to the target model,
- * DROP it otherwise. Blocks are never rewritten in place.
+ * Drop replayed thinking blocks on the Anthropic-native Claude passthrough that are
+ * provably unsafe for the target model, never rewriting a block in place (Anthropic
+ * rejects modified thinking blocks in the latest assistant turn, #3775).
  *
- * Three 400s occur when prior assistant thinking blocks are replayed as history:
+ * Dropped:
+ *   - unsigned `thinking` / payload-less `redacted_thinking` (never issued by Anthropic,
+ *     see {@link dropUnsignedPassthroughThinkingBlocks}, #12917);
+ *   - `thinking` whose signature decodes as a Claude signature tagged with a model other
+ *     than `targetModel` — a combo hopping claude-opus → claude-sonnet would otherwise
+ *     replay a model-bound signature and get 400 "Invalid signature" (#2454).
  *
- *   1. messages.N.content.M.thinking: each thinking block must contain thinking
- *      — Anthropic can emit a `thinking` block with empty visible text plus a valid
- *        signature (#5108, the non-streaming Bash classifier).
- *   2. messages.N.content.M: Invalid `signature` in `thinking` block
- *      — a thinking signature is bound to the exact model that minted it; a combo that
- *        hops claude-opus → claude-sonnet replays an opus signature to a sonnet target,
- *        which Anthropic rejects (#2454).
- *   3. Rewriting the block in place instead (a previous fix) trips "blocks in the latest
- *      assistant message cannot be modified" (#3775).
- *
- * Anthropic forbids *modifying* thinking blocks in the latest assistant turn but ALLOWS
- * *dropping* them, and Claude has no cross-provider bypass sentinel, so an unsafe block
- * is dropped rather than rewritten. A block is kept only when
- * `isClaudeSignatureReplaySafeForModel` confirms its signature is a structurally-valid
- * Claude signature AND either carries no model tag (compact schema) or a model tag that
- * matches `targetModel`. This preserves the reasoning chain on same-model multi-turn
- * (the common case) and drops only the blocks that would actually 400 — the cross-model
- * combo hop and the empty/foreign/fabricated ones.
- *
- * Applied uniformly to every assistant turn (dropping is not a modification). Messages
- * emptied by the drop are removed so no empty `content: []` reaches Anthropic. Returns
- * the same array reference when nothing needed dropping.
+ * Everything else (including opaque signatures and `redacted_thinking` data, which
+ * Anthropic validates server-side) is kept verbatim. Messages emptied by the drop are
+ * removed so no empty `content: []` reaches Anthropic. Returns the same array reference
+ * when nothing needed dropping.
  */
 export function sanitizeClaudePassthroughThinkingBlocks(
   messages: unknown,
@@ -582,14 +582,7 @@ export function sanitizeClaudePassthroughThinkingBlocks(
     let contentMutated = false;
     const kept = blocks.filter((block) => {
       if (!block || typeof block !== "object") return true;
-      if (block.type === "thinking") {
-        if (isClaudeSignatureReplaySafeForModel(block.signature, targetModel)) return true;
-        contentMutated = true;
-        return false;
-      }
-      if (block.type === "redacted_thinking") {
-        // redacted_thinking carries an opaque `data` blob (no inspectable model tag);
-        // its replay safety cannot be verified, so drop it on cross-model-capable combos.
+      if (isUnsignedThinkingBlock(block) || isCrossModelClaudeThinkingBlock(block, targetModel)) {
         contentMutated = true;
         return false;
       }

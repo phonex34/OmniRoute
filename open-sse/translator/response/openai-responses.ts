@@ -1669,14 +1669,16 @@ function openaiResponsesToOpenAIResponseStream(chunk, state) {
 function flushClaudeResponsesThinking(state) {
   if (state.claudeResponsesThinkingFlushed) return;
   state.claudeResponsesThinkingFlushed = true;
-  if (!(state.claudeResponsesThinkingBlocks instanceof Map)) return;
+  if (!(state.claudeResponsesContentBlocks instanceof Map)) return;
+  // Release store contract (#17324): ordered thinking / redacted_thinking / tool_use content.
   storeClaudeThinkingBlocks({
-    toolUseIds: state.claudeResponsesToolUseIds,
-    blocks: [...state.claudeResponsesThinkingBlocks.entries()]
+    content: [...state.claudeResponsesContentBlocks.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, block]) => block),
     provider: state.provider,
     model: state.model,
+    // Signatures are org-scoped (#17324): the store refuses unbound entries.
+    connectionId: state.connectionId,
   });
 }
 
@@ -1688,8 +1690,7 @@ export function claudeToOpenAIResponsesResponse(chunk, state) {
   if (chunk.type === "message_start") {
     state.responseId = `resp_${chunk.message?.id || Date.now()}`;
     state.model = chunk.message?.model;
-    state.claudeResponsesThinkingBlocks = new Map();
-    state.claudeResponsesToolUseIds = [];
+    state.claudeResponsesContentBlocks = new Map();
     state.claudeResponsesThinkingFlushed = false;
     const usage = chunk.message?.usage;
     if (usage && typeof usage === "object" && typeof usage.input_tokens === "number") {
@@ -1718,18 +1719,18 @@ export function claudeToOpenAIResponsesResponse(chunk, state) {
   if (chunk.type === "content_block_start") {
     const block = chunk.content_block;
     if (block?.type === "thinking") {
-      state.claudeResponsesThinkingBlocks.set(chunk.index, {
+      state.claudeResponsesContentBlocks.set(chunk.index, {
         type: "thinking",
         thinking: typeof block.thinking === "string" ? block.thinking : "",
         signature: typeof block.signature === "string" ? block.signature : "",
       });
     } else if (block?.type === "redacted_thinking") {
-      state.claudeResponsesThinkingBlocks.set(chunk.index, {
+      state.claudeResponsesContentBlocks.set(chunk.index, {
         type: "redacted_thinking",
         data: block.data,
       });
     } else if (block?.type === "tool_use") {
-      state.claudeResponsesToolUseIds.push(block.id);
+      state.claudeResponsesContentBlocks.set(chunk.index, { type: "tool_use", id: block.id });
     }
     if (block?.type === "thinking" || block?.type === "redacted_thinking") {
       if (state.reasoningId && !state.reasoningDone) closeReasoning(state, emit);
@@ -1758,13 +1759,16 @@ export function claudeToOpenAIResponsesResponse(chunk, state) {
     const delta = chunk.delta;
     if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
       startReasoning(state, emit, chunk.index);
-      const tracked = state.claudeResponsesThinkingBlocks.get(chunk.index);
+      const tracked = state.claudeResponsesContentBlocks.get(chunk.index);
       if (tracked?.type === "thinking") tracked.thinking += delta.thinking;
       emitReasoningDelta(state, emit, delta.thinking);
     } else if (delta?.type === "signature_delta" && typeof delta.signature === "string") {
-      const tracked = state.claudeResponsesThinkingBlocks.get(chunk.index);
-      if (tracked?.type === "thinking") tracked.signature += delta.signature;
-      state.reasoningEncryptedContent = delta.signature;
+      const tracked = state.claudeResponsesContentBlocks.get(chunk.index);
+      if (tracked?.type === "thinking") {
+        tracked.signature += delta.signature;
+        // signature_delta may arrive in several chunks; expose the complete signature.
+        state.reasoningEncryptedContent = tracked.signature;
+      }
     } else if (delta?.type === "text_delta" && typeof delta.text === "string") {
       if (state.reasoningId && !state.reasoningDone) closeReasoning(state, emit);
       emitTextContent(state, emit, chunk.index, delta.text);

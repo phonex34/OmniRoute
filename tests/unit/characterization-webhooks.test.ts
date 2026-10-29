@@ -110,6 +110,7 @@ test("surface: event catalogue (values ↔ descriptions)", () => {
       "proxy.set_aside",
       "proxy.pool.exhausted",
       "provider.reset_redeemed",
+      // Fork additions (usage report + combo tier-drop notifications).
       "usage.report",
       "combo.switched",
       "test.ping",
