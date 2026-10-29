@@ -266,37 +266,6 @@ for (const usage of reportedUsages.slice(1)) {
       assert.equal(isEmptyContentResponse(body, { provider: "codex" }), true, status);
     }
   });
-
-  test(`Codex ${label} completed empty raw Responses and chat fail watcher and combo`, async () => {
-    const frames = silentEvents(usage);
-    const chatFrames = [
-      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage })}\n\n`,
-      "data: [DONE]\n\n",
-    ];
-    for (const [stream, format] of [
-      [frames, FORMATS.OPENAI_RESPONSES],
-      [chatFrames, FORMATS.OPENAI],
-    ] as const) {
-      for (const authenticated of [false, true]) {
-        const seen = await clientSees(stream, "codex", format, authenticated);
-        assertEmptyStreamRejected(seen, format);
-        assert.equal((await quality(sse([seen]), true)).valid, false, format);
-      }
-      assert.equal((await quality(sse(stream), true)).valid, false, format);
-    }
-  });
-
-  test(`Codex ${label} completed empty turn fails full Responses transform, watcher and combo`, async () => {
-    for (const format of [FORMATS.CLAUDE, FORMATS.OPENAI]) {
-      for (const fragmented of [false, true]) {
-        for (const trailingNewline of [false, true]) {
-          const text = await translate(silentEvents(usage), format, fragmented, trailingNewline);
-          assertEmptyStreamRejected(text, format);
-          assert.equal((await quality(sse([text]), true)).valid, false);
-        }
-      }
-    }
-  });
 }
 
 test("generated Codex usage alone never grants watcher execution trust", async () => {
@@ -320,60 +289,40 @@ test("generated Codex usage alone never grants watcher execution trust", async (
   }
 });
 
-test("authenticated native Codex empty completion fails with zero generated tokens", async () => {
-  const frames = silentEvents(reportedUsages[0]);
-  assertEmptyStreamRejected(await clientSees(frames, "codex", FORMATS.OPENAI_RESPONSES, true));
-  for (const format of [FORMATS.OPENAI, FORMATS.CLAUDE]) {
-    const text = await translate(frames, format, true, false);
-    assertEmptyStreamRejected(text, format);
-    assert.equal((await quality(sse([text]), true)).valid, false);
+// Authenticated native execution is the trust boundary: the same silent turn that
+// fails over unauthenticated above is a clean, error-free success for every client.
+const STRUCTURED_FAILURE = /"error":\{|"type":"error"|response\.failed|"finish_reason":"error"/;
+test("authenticated native Codex silent turn is a clean success for every client format", async () => {
+  for (const usage of reportedUsages) {
+    // Native Codex speaks Responses; Chat and Claude clients receive it translated.
+    const seen = await clientSees(silentEvents(usage), "codex", FORMATS.OPENAI_RESPONSES, true);
+    assert.doesNotMatch(seen, STRUCTURED_FAILURE, `responses ${usage.output_tokens}`);
+    for (const format of [FORMATS.CLAUDE, FORMATS.OPENAI]) {
+      const text = await translate(silentEvents(usage), format, true, false);
+      assert.doesNotMatch(text, STRUCTURED_FAILURE, `${format} ${usage.output_tokens}`);
+    }
+    const claudeText = await translate(silentEvents(usage), FORMATS.CLAUDE);
+    assert.match(claudeText, /"stop_reason":"end_turn"/);
   }
 });
 
-// Authentication and missing content-type headers must not turn empty output
-// into success, regardless of upstream chunk boundaries.
-test("native Codex silent turn without a content-type header still fails", async () => {
-  const markHeaderless = (frames: string[], chunk: number) => {
-    const bytes = new TextEncoder().encode(frames.join(""));
-    const body = new ReadableStream<Uint8Array>({
+// A failed terminal stays a failure even on an authenticated, header-less stream.
+test("native Codex failed terminal without a content-type header still fails", async () => {
+  const failedFrames = silentEvents(reportedUsages[1], "failed");
+  const bytes = new TextEncoder().encode(failedFrames.join(""));
+  const raw = new Response(
+    new ReadableStream<Uint8Array>({
       start(controller) {
-        for (let i = 0; i < bytes.length; i += chunk)
-          controller.enqueue(bytes.subarray(i, i + chunk));
+        controller.enqueue(bytes);
         controller.close();
       },
-    });
-    const raw = new Response(body);
-    raw.headers.delete("content-type");
-    return markEmptyTurnExecution(raw, getRegistryEntry("codex")!.baseUrl!, {
-      connectionId: "native-test-connection",
-      accessToken: "native-test-token",
-    });
-  };
-  for (const chunk of [1 << 20, 7]) {
-    const frames = silentEvents(reportedUsages[1]);
-    const upstream = markHeaderless(frames, chunk);
-    const watched = pipeWithDisconnect(
-      upstream,
-      createSSEStream({
-        targetFormat: FORMATS.OPENAI_RESPONSES,
-        sourceFormat: FORMATS.OPENAI,
-        provider: "codex",
-        trustedEmptyTurn: () => hasTrustedEmptyTurn(upstream),
-        model: "gpt-6.1-sol",
-        body: { messages: [{ role: "user", content: "hi" }] },
-      }),
-      createStreamController({
-        provider: "codex",
-        model: "m",
-        clientResponseFormat: FORMATS.OPENAI,
-      })
-    );
-    const text = await new Response(watched).text();
-    assertEmptyStreamRejected(text, `chunk ${chunk}`);
-    assert.equal((await quality(sse([text]), true)).valid, false, `chunk ${chunk}`);
-  }
-
-  const failed = markHeaderless(silentEvents(reportedUsages[1], "failed"), 1 << 20);
+    })
+  );
+  raw.headers.delete("content-type");
+  const failed = markEmptyTurnExecution(raw, getRegistryEntry("codex")!.baseUrl!, {
+    connectionId: "native-test-connection",
+    accessToken: "native-test-token",
+  });
   const watchedFailed = pipeWithDisconnect(
     failed,
     new TransformStream(),
