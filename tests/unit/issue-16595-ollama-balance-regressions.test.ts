@@ -59,10 +59,16 @@ test("legacy API windows preserve observed fractions; cookie and other-provider 
     },
   });
   assert.equal(parseQuotaData("ollama-cloud", { quotas })[0].remainingPercentage, 40);
+  // A past reset only rolls the display over to 100% for a genuinely fresh fetch; the
+  // timestamp makes this a real rollover rather than a stale payload (see T13).
+  const fetchedAt = new Date().toISOString();
   const cookie = { session: { ...quotas.session, ollamaApiBalance: undefined } };
-  assert.equal(parseQuotaData("ollama-cloud", { quotas: cookie })[0].remainingPercentage, 100);
-  assert.equal(parseQuotaData("openai", { quotas })[0].remainingPercentage, 100);
-  assert.equal(parseQuotaData("openrouter", { quotas })[0].remainingPercentage, 100);
+  assert.equal(
+    parseQuotaData("ollama-cloud", { quotas: cookie, fetchedAt })[0].remainingPercentage,
+    100
+  );
+  assert.equal(parseQuotaData("openai", { quotas, fetchedAt })[0].remainingPercentage, 100);
+  assert.equal(parseQuotaData("openrouter", { quotas, fetchedAt })[0].remainingPercentage, 100);
 });
 
 test("only verified positive Ollama USD credits suppress included-only preflight blocks", () => {
