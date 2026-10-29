@@ -251,12 +251,18 @@ export function getMigrationFiles(): Array<{ version: string; name: string; path
   // Numeric, not text, order: as text `20261113120000_x.sql` would sort before
   // `235_x.sql` and run ahead of the tables it depends on. Files sharing a slot
   // (superseded duplicates) keep their file-name order, as with the old text sort.
+  //
+  // A trailing letter (`214a_`) marks a fork-only migration: it never takes a
+  // number upstream will use next. `compareMigrationFiles` keeps it in the
+  // catch-all version group, so a fork migration added after the base has already
+  // shipped applies once, at the end — the same database state a fresh install
+  // reaches, because it only adds its own columns and index.
   const files = (
     fs
       .readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
       .map((filename) => {
-        const match = filename.match(/^(\d+)_(.+)\.sql$/);
+        const match = filename.match(/^(\d+[a-z]?)_(.+)\.sql$/);
         if (!match) return null;
         return {
           version: match[1],
