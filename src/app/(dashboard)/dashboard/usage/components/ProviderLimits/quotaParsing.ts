@@ -189,10 +189,15 @@ function parseGithub(data: any) {
     .filter(([, quota]) => quota?.creditsUsed !== undefined || !isUnlimitedEmpty(quota))
     .map(([name, quota]) =>
       quota?.creditsUsed !== undefined
-        ? normalizeQuotaEntry(name, quota, {
-            creditsUsed: Number(quota.creditsUsed) || 0,
-            unlimited: quota.unlimited === true,
-          }, data?.fetchedAt)
+        ? normalizeQuotaEntry(
+            name,
+            quota,
+            {
+              creditsUsed: Number(quota.creditsUsed) || 0,
+              unlimited: quota.unlimited === true,
+            },
+            data?.fetchedAt
+          )
         : normalizeQuotaEntry(name, quota, {}, data?.fetchedAt)
     );
 }
@@ -411,15 +416,20 @@ function parseAgentrouter(data: any) {
 // Ollama Cloud `/api/balance` (open-sse/services/ollamaCloudBalance.ts) reports purchased
 // credits as a `credits` USD balance next to the monthly/session/weekly percent windows. Route
 // that row through buildCreditsQuota() so it renders as "$X.XX", not as a percentage bar.
-function normalizeOllamaWindow(name: string, quota: any) {
-  if (quota?.ollamaApiBalance !== true) return normalizeQuotaEntry(name, quota);
+function normalizeOllamaWindow(name: string, quota: any, fetchedAt?: any) {
+  if (quota?.ollamaApiBalance !== true) return normalizeQuotaEntry(name, quota, {}, fetchedAt);
   // A fresh API balance is authoritative even when the reported period end is in the past.
-  return normalizeQuotaEntry(name, { ...quota, resetAt: null }, { resetAt: quota.resetAt });
+  return normalizeQuotaEntry(
+    name,
+    { ...quota, resetAt: null },
+    { resetAt: quota.resetAt },
+    fetchedAt
+  );
 }
 
 function parseOllamaCloud(data: any) {
   return quotaEntries(data).map(([quotaKey, quota]) => {
-    if (quotaKey !== "credits") return normalizeOllamaWindow(quotaKey, quota);
+    if (quotaKey !== "credits") return normalizeOllamaWindow(quotaKey, quota, data?.fetchedAt);
     const remaining = Math.max(0, Number(quota?.remaining ?? 0) || 0);
     const currency = quota?.currency || "USD";
     return buildCreditsQuota("credits", remaining, remaining > 0 ? 100 : 0, { currency });
@@ -434,8 +444,8 @@ function parseOllamaCloud(data: any) {
 // instead of the dollar balance. Route it through buildCreditsQuota() (same
 // shape DeepSeek/AgentRouter credits rows use) so the credit count renders as
 // USD. Free-tier request windows keep the generic percentage treatment.
-function parseOpenrouterQuota(quotaKey: string, quota: any) {
-  if (quotaKey !== "credits") return normalizeQuotaEntry(quotaKey, quota);
+function parseOpenrouterQuota(quotaKey: string, quota: any, fetchedAt?: any) {
+  if (quotaKey !== "credits") return normalizeQuotaEntry(quotaKey, quota, {}, fetchedAt);
   // OpenRouter backend (PRs #12256 + #12468) reports a positive-denominator
   // PAYG payload (used, total, remaining, remainingPercentage) and a
   // balance-only payload under legacy keys. The credits renderer in
@@ -457,7 +467,9 @@ function parseOpenrouterQuota(quotaKey: string, quota: any) {
   return buildCreditsQuota("credits", remaining, remainingPercentage, { currency });
 }
 function parseOpenrouter(data: any) {
-  return quotaEntries(data).map(([quotaKey, quota]) => parseOpenrouterQuota(quotaKey, quota));
+  return quotaEntries(data).map(([quotaKey, quota]) =>
+    parseOpenrouterQuota(quotaKey, quota, data?.fetchedAt)
+  );
 }
 
 /**

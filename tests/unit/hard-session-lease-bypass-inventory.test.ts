@@ -373,7 +373,9 @@ const EXPECTED: Record<InventoryKind, Record<string, number>> = {
     // The fifth site re-reads the row after a live usage fetch only to compare the stored API key
     // with the one the fetch used (an edit during the fetch retires the reading). It is a
     // read-back guard, never selection or dispatch, so the class stays the same.
-    "src/lib/usage/providerLimits.ts": 5,
+    // A sixth site lists the active, usage-supported connections to build the usage-report
+    // payload (buildUsageReportFromCache); it never selects or dispatches a request either.
+    "src/lib/usage/providerLimits.ts": 6,
     // #4305 port: after a confirmed reset-credit redemption (whose caller already passed
     // the auxiliary-lease gate) the row is re-read only to check its terminal/codex-scope
     // state before lifting the local quota cooldown — a state read, never connection
