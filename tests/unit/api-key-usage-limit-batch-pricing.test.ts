@@ -14,6 +14,7 @@ const apiKeysDb = await import("../../src/lib/db/apiKeys.ts");
 const usageHistory = await import("../../src/lib/usage/usageHistory.ts");
 const usageLimits = await import("../../src/lib/usage/apiKeyUsageLimits.ts");
 const pricingDb = await import("../../src/lib/db/settings/pricing.ts");
+const readCache = await import("../../src/lib/db/readCache.ts");
 
 const NOW = Date.parse("2026-06-19T20:00:00.000Z");
 
@@ -151,4 +152,57 @@ test("each request is billed at its own long-context tier when one model spans b
   const status = await usageLimits.getApiKeyUsageLimitStatus(metadata, { now: () => NOW });
   // 250k tokens below the tier at $1/M, 300k above it at $10/M.
   assert.equal(status.dailySpentUsd, 3.25);
+});
+
+test("a catalogue-snapshot cost (calculated_cost_usd only) is billed as reported, never re-priced", async () => {
+  await pricingDb.updatePricing({
+    openai: { "gpt-4o": { input: 1, cached: 1, output: 1, reasoning: 1, cache_creation: 1 } },
+  });
+  const { created, metadata } = await makeMeteredKey();
+  // Release's cost fallback: a row may carry only the catalogue snapshot amount.
+  // Re-pricing its 5M tokens at $1/M would charge $5 instead of the reported $0.42.
+  core
+    .getDbInstance()
+    .prepare(
+      `INSERT INTO usage_history
+        (provider, model, api_key_id, tokens_input, success, timestamp, calculated_cost_usd)
+       VALUES ('openai', 'gpt-4o', ?, 5000000, 1, '2026-06-19T12:00:00.000Z', 0.42)`
+    )
+    .run(created.id);
+
+  const status = await usageLimits.getApiKeyUsageLimitStatus(metadata, { now: () => NOW });
+  assert.equal(status.dailySpentUsd, 0.42);
+  assert.equal(status.dailyHasUnpricedUsage, false);
+});
+
+test("a failed cost lookup is not cached: the request is priced once the pricing store recovers", async () => {
+  await pricingDb.updatePricing({
+    openai: { "gpt-4o": { input: 1, cached: 1, output: 1, reasoning: 1, cache_creation: 1 } },
+  });
+  const { created, metadata } = await makeMeteredKey();
+  await saveUsage(created.id, "openai", "gpt-4o", 2_000_000);
+
+  const db = core.getDbInstance();
+  db.exec("ALTER TABLE key_value RENAME TO key_value_offline");
+  readCache.invalidateDbCache("pricing", undefined, { skipModelCatalog: true });
+  try {
+    // Provider quota caches live in key_value too; stub them so only pricing is offline.
+    const failed = await usageLimits.getApiKeyUsageLimitStatus(metadata, {
+      now: () => NOW,
+      getProviderConnectionById: async () => null,
+      getProviderConnections: async () => [],
+      getProviderLimitsCache: () => null,
+      getAllProviderLimitsCache: () => ({}),
+    });
+    assert.equal(failed.dailyPricingFailure, true);
+    assert.equal(failed.dailyExceeded, true);
+  } finally {
+    db.exec("ALTER TABLE key_value_offline RENAME TO key_value");
+    readCache.invalidateDbCache("pricing", undefined, { skipModelCatalog: true });
+  }
+
+  const recovered = await usageLimits.getApiKeyUsageLimitStatus(metadata, { now: () => NOW });
+  assert.equal(recovered.dailyPricingFailure, false);
+  assert.equal(recovered.dailyExceeded, false);
+  assert.equal(recovered.dailySpentUsd, 2, "the request is priced, not frozen at the failed $0");
 });

@@ -121,28 +121,24 @@ export function buildTelegramPayload(
     isApproaching && remainingPct !== null ? remainingDot(remainingPct) : desc.emoji;
   const headerLabel = isApproaching ? "Approaching Quota Limit" : desc.label;
 
-  const lines: string[] = [`${headerEmoji} *${headerLabel}*`, ""];
-
-  const providerUpper = provider ? `*${provider.toUpperCase()}*` : null;
-  const statusSuffix = status !== null ? ` · ${escapeMd(String(status))}` : "";
-  const providerLine = [providerUpper, accountDisplay].filter(Boolean).join(" · ");
-  if (providerLine) lines.push(`${providerLine}${statusSuffix}`);
-  else if (status !== null) lines.push(`Status: \`${escapeMd(String(status))}\``);
-  if (model) lines.push(`Model: ${model}`);
-  if (combo) lines.push(`Combo: ${combo}`);
-  if (quotaWindow) lines.push(`Window: ${quotaWindow}`);
+  const lines: string[] = [`${headerEmoji} *${headerLabel}*`];
+  if (model) lines.push(`Model: \`${model}\``);
+  if (provider) lines.push(`Provider: \`${provider}\``);
+  if (accountDisplay) lines.push(`Account: \`${accountDisplay}\``);
+  if (combo) lines.push(`Combo: \`${combo}\``);
+  if (status !== null) lines.push(`Status: \`${escapeMd(String(status))}\``);
+  if (quotaWindow) lines.push(`Window: \`${quotaWindow}\``);
   if (remainingPct !== null) {
     lines.push(`${remainingDot(remainingPct)} *${remainingPct}% remaining*`);
   }
-  if (resetIn) lines.push(`Resets in ${resetIn}`);
-  if (latencyMs !== null) lines.push(`Latency: ${latencyMs}ms`);
-  if (fallbackCount !== null) lines.push(`Fallbacks: ${fallbackCount}`);
+  if (resetIn) lines.push(`Resets in \`${resetIn}\``);
+  if (latencyMs !== null) lines.push(`Latency: \`${latencyMs}ms\``);
+  if (fallbackCount !== null) lines.push(`Fallbacks: \`${fallbackCount}\``);
   if (error) lines.push(`Error: \`${error}\``);
   if (failureCount !== null && failureCount > 1) {
     lines.push(`_${failureCount} failures grouped_`);
   }
-  lines.push("");
-  lines.push(`_${footer()}_`);
+  lines.push(`_OmniRoute · ${new Date().toISOString()}_`);
 
   return {
     chat_id: chatId,
