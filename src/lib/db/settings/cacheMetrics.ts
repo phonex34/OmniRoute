@@ -20,7 +20,10 @@ export async function getCacheMetrics() {
         MAX(CASE WHEN usage_provenance = 'estimated' THEN 1 ELSE 0 END) as estimated,
         COUNT(tokens_cache_read) = COUNT(*) as totalCachedTokensComplete,
         COUNT(tokens_cache_creation) = COUNT(*) as totalCacheCreationTokensComplete,
-        SUM(CASE WHEN tokens_cache_read > 0 OR tokens_cache_creation > 0 THEN 1 ELSE 0 END) as cachedRequests
+        SUM(CASE WHEN tokens_cache_read > 0 OR tokens_cache_creation > 0 THEN 1 ELSE 0 END) as cachedRequests,
+        SUM(CASE WHEN tokens_cache_read > 0 THEN 1 ELSE 0 END) as cacheReadRequests,
+        SUM(CASE WHEN tokens_cache_read IS NOT NULL THEN 1 ELSE 0 END) as requestsWithKnownCacheRead,
+        SUM(CASE WHEN tokens_cache_read IS NOT NULL THEN tokens_input ELSE 0 END) as inputTokensWithKnownCacheRead
       FROM usage_history
     `
       )
@@ -28,6 +31,9 @@ export async function getCacheMetrics() {
       | {
           estimated: number;
           cachedRequests: number;
+          cacheReadRequests: number;
+          requestsWithKnownCacheRead: number;
+          inputTokensWithKnownCacheRead: number;
           totalCachedTokensComplete: number;
           totalCacheCreationTokensComplete: number;
           totalRequests: number;
@@ -60,7 +66,10 @@ export async function getCacheMetrics() {
         SUM(tokens_cache_creation) as cacheCreationTokens,
         MAX(CASE WHEN usage_provenance = 'estimated' THEN 1 ELSE 0 END) as estimated,
         COUNT(tokens_cache_read) = COUNT(*) as cachedTokensComplete,
-        COUNT(tokens_cache_creation) = COUNT(*) as cacheCreationTokensComplete
+        COUNT(tokens_cache_creation) = COUNT(*) as cacheCreationTokensComplete,
+        SUM(CASE WHEN tokens_cache_read > 0 THEN 1 ELSE 0 END) as cacheReadRequests,
+        SUM(CASE WHEN tokens_cache_read IS NOT NULL THEN 1 ELSE 0 END) as requestsWithKnownCacheRead,
+        SUM(CASE WHEN tokens_cache_read IS NOT NULL THEN tokens_input ELSE 0 END) as inputTokensWithKnownCacheRead
       FROM usage_history
       WHERE provider IS NOT NULL
       GROUP BY provider
@@ -76,6 +85,9 @@ export async function getCacheMetrics() {
       cacheCreationTokens: number | null;
       cachedTokensComplete: number;
       cacheCreationTokensComplete: number;
+      cacheReadRequests: number;
+      requestsWithKnownCacheRead: number;
+      inputTokensWithKnownCacheRead: number;
     }>;
 
     // Aggregate by combo strategy (direct requests stored as 'direct')
@@ -130,6 +142,9 @@ export async function getCacheMetrics() {
         cacheCreationTokens: number | null;
         cachedTokensComplete: boolean;
         cacheCreationTokensComplete: boolean;
+        cacheReadRequests: number;
+        requestsWithKnownCacheRead: number;
+        inputTokensWithKnownCacheRead: number;
       }
     > = {};
     for (const row of byProviderRows) {
@@ -143,6 +158,9 @@ export async function getCacheMetrics() {
         cacheCreationTokens: row.cacheCreationTokens,
         cachedTokensComplete: Boolean(row.cachedTokensComplete),
         cacheCreationTokensComplete: Boolean(row.cacheCreationTokensComplete),
+        cacheReadRequests: row.cacheReadRequests,
+        requestsWithKnownCacheRead: row.requestsWithKnownCacheRead,
+        inputTokensWithKnownCacheRead: row.inputTokensWithKnownCacheRead,
       };
     }
 
@@ -175,6 +193,9 @@ export async function getCacheMetrics() {
       estimated: Boolean(totalsRow?.estimated),
       totalRequests: allRequestsRow?.totalRequests || totalsRow?.totalRequests || 0,
       requestsWithCacheControl: totalsRow?.cachedRequests || 0,
+      cacheReadRequests: totalsRow?.cacheReadRequests || 0,
+      requestsWithKnownCacheRead: totalsRow?.requestsWithKnownCacheRead || 0,
+      inputTokensWithKnownCacheRead: totalsRow?.inputTokensWithKnownCacheRead || 0,
       totalInputTokens: totalsRow?.totalInputTokens || 0,
       totalCachedTokens: totalsRow?.totalCachedTokens ?? null,
       totalCacheCreationTokens: totalsRow?.totalCacheCreationTokens ?? null,
@@ -193,6 +214,9 @@ export async function getCacheMetrics() {
       estimated: false,
       totalRequests: 0,
       requestsWithCacheControl: 0,
+      cacheReadRequests: 0,
+      requestsWithKnownCacheRead: 0,
+      inputTokensWithKnownCacheRead: 0,
       totalInputTokens: 0,
       totalCachedTokens: null,
       totalCacheCreationTokens: null,
@@ -224,6 +248,11 @@ export interface CacheTrendPoint {
   cacheCreationTokens: number | null;
   cachedTokensComplete: boolean;
   cacheCreationTokensComplete: boolean;
+  /** Rows that read from cache; numerator of the rate over the known denominator. */
+  cacheReadRequests: number;
+  /** Rows whose cache-read counter was reported; the reuse/rate denominators. */
+  requestsWithKnownCacheRead: number;
+  inputTokensWithKnownCacheRead: number;
 }
 
 export async function getCacheTrend(hours = 24): Promise<CacheTrendPoint[]> {
@@ -242,7 +271,10 @@ export async function getCacheTrend(hours = 24): Promise<CacheTrendPoint[]> {
           SUM(tokens_cache_creation) as cacheCreationTokens,
         MAX(CASE WHEN usage_provenance = 'estimated' THEN 1 ELSE 0 END) as estimated,
         COUNT(tokens_cache_read) = COUNT(*) as cachedTokensComplete,
-        COUNT(tokens_cache_creation) = COUNT(*) as cacheCreationTokensComplete
+        COUNT(tokens_cache_creation) = COUNT(*) as cacheCreationTokensComplete,
+        SUM(CASE WHEN tokens_cache_read > 0 THEN 1 ELSE 0 END) as cacheReadRequests,
+        SUM(CASE WHEN tokens_cache_read IS NOT NULL THEN 1 ELSE 0 END) as requestsWithKnownCacheRead,
+        SUM(CASE WHEN tokens_cache_read IS NOT NULL THEN tokens_input ELSE 0 END) as inputTokensWithKnownCacheRead
         FROM usage_history
         WHERE timestamp >= datetime('now', ?)
         GROUP BY hour
@@ -259,6 +291,9 @@ export async function getCacheTrend(hours = 24): Promise<CacheTrendPoint[]> {
       cacheCreationTokens: number | null;
       cachedTokensComplete: number;
       cacheCreationTokensComplete: number;
+      cacheReadRequests: number;
+      requestsWithKnownCacheRead: number;
+      inputTokensWithKnownCacheRead: number;
     }>;
 
     return rows.map((r) => ({
@@ -271,6 +306,9 @@ export async function getCacheTrend(hours = 24): Promise<CacheTrendPoint[]> {
       cacheCreationTokens: r.cacheCreationTokens,
       cachedTokensComplete: Boolean(r.cachedTokensComplete),
       cacheCreationTokensComplete: Boolean(r.cacheCreationTokensComplete),
+      cacheReadRequests: r.cacheReadRequests,
+      requestsWithKnownCacheRead: r.requestsWithKnownCacheRead,
+      inputTokensWithKnownCacheRead: r.inputTokensWithKnownCacheRead,
     }));
   } catch (error) {
     console.error("Failed to fetch cache trend:", error);
