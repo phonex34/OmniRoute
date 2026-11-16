@@ -47,6 +47,9 @@ interface PromptCacheProviderStats {
   cacheCreationTokens: number | null;
   cachedTokensComplete?: boolean;
   cacheCreationTokensComplete?: boolean;
+  cacheReadRequests?: number;
+  requestsWithKnownCacheRead?: number;
+  inputTokensWithKnownCacheRead?: number;
 }
 
 interface PromptCacheMetrics {
@@ -58,6 +61,9 @@ interface PromptCacheMetrics {
   totalCacheCreationTokens: number | null;
   totalCachedTokensComplete?: boolean;
   totalCacheCreationTokensComplete?: boolean;
+  cacheReadRequests?: number;
+  requestsWithKnownCacheRead?: number;
+  inputTokensWithKnownCacheRead?: number;
   tokensSaved: number | null;
   estimatedCostSaved: number | null;
   savingsComplete?: boolean;
@@ -81,6 +87,9 @@ interface CacheTrendPoint {
   cacheCreationTokens: number | null;
   cachedTokensComplete?: boolean;
   cacheCreationTokensComplete?: boolean;
+  cacheReadRequests?: number;
+  requestsWithKnownCacheRead?: number;
+  inputTokensWithKnownCacheRead?: number;
 }
 
 interface CacheConfig {
@@ -261,9 +270,18 @@ function PromptTrendPanel({
   const busiestHour = trend.reduce((best, point) =>
     point.requests > best.requests ? point : best
   );
+  // Numerator and denominator must describe the same cohort: a positive read proves a
+  // hit, and a miss needs the read counter reported. `cachedRequests` (read>0 OR
+  // write>0) would let a write-only row land in the numerator of a read-only denominator.
+  const cacheReadHitsOf = (point: CacheTrendPoint) =>
+    point.cacheReadRequests ?? point.cachedRequests;
+  const knownRequestsOf = (point: CacheTrendPoint) =>
+    point.requestsWithKnownCacheRead ?? point.requests;
   const peakCacheRatePoint = trend.reduce((best, point) => {
-    const bestRate = best.requests > 0 ? best.cachedRequests / best.requests : 0;
-    const currentRate = point.requests > 0 ? point.cachedRequests / point.requests : 0;
+    const bestDenominator = knownRequestsOf(best);
+    const currentDenominator = knownRequestsOf(point);
+    const bestRate = bestDenominator > 0 ? cacheReadHitsOf(best) / bestDenominator : 0;
+    const currentRate = currentDenominator > 0 ? cacheReadHitsOf(point) / currentDenominator : 0;
     return currentRate > bestRate ? point : best;
   });
   const maxRequests = Math.max(1, ...trend.map((point) => point.requests));
@@ -292,11 +310,7 @@ function PromptTrendPanel({
         <DetailStat
           label={peakCacheRateLabel}
           value={cachePercent(
-            cacheRatio(
-              peakCacheRatePoint.cachedRequests,
-              peakCacheRatePoint.requests,
-              activityComplete
-            ),
+            cacheRatio(cacheReadHitsOf(peakCacheRatePoint), knownRequestsOf(peakCacheRatePoint)),
             unknown
           )}
           accent="text-success"
@@ -324,14 +338,8 @@ function PromptTrendPanel({
             .reverse()
             .map((point) => {
               const cacheRate = cacheRatio(
-                point.cachedRequests,
-                point.requests,
-                cacheActivityComplete(
-                  point.cachedTokens,
-                  point.cacheCreationTokens,
-                  point.cachedTokensComplete,
-                  point.cacheCreationTokensComplete
-                )
+                point.cacheReadRequests ?? point.cachedRequests,
+                point.requestsWithKnownCacheRead ?? point.requests
               );
               const volumeWidth = Math.max(8, (point.requests / maxRequests) * 100);
 
@@ -454,11 +462,17 @@ export default function CachePage() {
         pc.totalCacheCreationTokensComplete
       )
     : false;
+  // A row whose provider never reported the cache counter is `null`, not a measured
+  // zero (#20271). One such row must not blank the whole dashboard: compute each rate
+  // over the rows that DID report it, and keep the caveat next to the value.
   const promptCacheRate = pc
-    ? cacheRatio(pc.requestsWithCacheControl, pc.totalRequests, activityComplete)
+    ? cacheRatio(
+        pc.cacheReadRequests ?? pc.requestsWithCacheControl,
+        pc.requestsWithKnownCacheRead ?? pc.totalRequests
+      )
     : null;
   const promptReuseRatio = pc
-    ? cacheRatio(pc.totalCachedTokens, pc.totalInputTokens, pc.totalCachedTokensComplete)
+    ? cacheRatio(pc.totalCachedTokens, pc.inputTokensWithKnownCacheRead ?? pc.totalInputTokens)
     : null;
   const providerEntries = pc
     ? Object.entries(pc.byProvider).sort(([, left], [, right]) => {
@@ -556,7 +570,7 @@ export default function CachePage() {
                       icon="speed"
                       label={t("cacheRate")}
                       value={cachePercent(promptCacheRate, tEvidence("unknown"))}
-                      sub={`${cacheMetric(pc.totalCachedTokens === null && pc.totalCacheCreationTokens === null ? null : pc.requestsWithCacheControl, activityComplete, tEvidence("unknown"), tEvidence("historicalUnknown"))} / ${pc.totalRequests.toLocaleString()} ${t("requests").toLowerCase()}`}
+                      sub={`${cacheMetric(pc.totalCachedTokens === null && pc.totalCacheCreationTokens === null ? null : (pc.cacheReadRequests ?? pc.requestsWithCacheControl), activityComplete, tEvidence("unknown"), tEvidence("historicalUnknown"))} / ${(pc.requestsWithKnownCacheRead ?? pc.totalRequests).toLocaleString()} ${t("requests").toLowerCase()}`}
                       accent="text-success"
                       size="hero"
                     />
@@ -564,11 +578,7 @@ export default function CachePage() {
                       icon="savings"
                       label={t("cacheReuseRatio")}
                       value={cachePercent(promptReuseRatio, tEvidence("unknown"))}
-                      sub={
-                        pc.estimated
-                          ? `${t("cacheReuseRatioDesc")} (${tEvidence("estimated")})`
-                          : t("cacheReuseRatioDesc")
-                      }
+                      sub={`${t("cacheReuseRatioDesc")}${pc.totalCachedTokensComplete === false ? ` (${tEvidence("historicalUnknown")})` : ""}${pc.estimated ? ` (${tEvidence("estimated")})` : ""}`}
                       accent="text-info"
                       size="hero"
                     />
@@ -646,16 +656,12 @@ export default function CachePage() {
                               data.cachedTokensComplete,
                               data.cacheCreationTokensComplete
                             );
-                            const cacheRate = cacheRatio(
-                              cachedRequests,
-                              totalRequests,
-                              providerActivityComplete
-                            );
-                            const reuseRatio = cacheRatio(
-                              data.cachedTokens,
-                              data.inputTokens,
-                              data.cachedTokensComplete
-                            );
+                            const knownRequests = data.requestsWithKnownCacheRead ?? totalRequests;
+                            const knownInputTokens =
+                              data.inputTokensWithKnownCacheRead ?? data.inputTokens;
+                            const cacheReadHits = data.cacheReadRequests ?? cachedRequests;
+                            const cacheRate = cacheRatio(cacheReadHits, knownRequests);
+                            const reuseRatio = cacheRatio(data.cachedTokens, knownInputTokens);
 
                             return (
                               <TableRow key={provider}>
@@ -700,12 +706,12 @@ export default function CachePage() {
                                   {cacheMetric(
                                     data.cachedTokens === null && data.cacheCreationTokens === null
                                       ? null
-                                      : cachedRequests,
+                                      : cacheReadHits,
                                     providerActivityComplete,
                                     tEvidence("unknown"),
                                     tEvidence("historicalUnknown")
                                   )}{" "}
-                                  / {totalRequests.toLocaleString()}
+                                  / {knownRequests.toLocaleString()}
                                 </TableCell>
                               </TableRow>
                             );
