@@ -212,8 +212,10 @@ test("the real migrations directory keeps its legacy text order, timestamps afte
     .readdirSync(REAL_MIGRATIONS_DIR)
     .filter((file) => file.endsWith(".sql"))
     .sort()
-    .filter((file) => /^(\d+)_(.+)\.sql$/.test(file));
+    .filter((file) => /^(\d+[a-z]?)_(.+)\.sql$/.test(file));
   const legacyTextOrder = migrationFiles.filter((file) => /^\d{3}_/.test(file));
+  // Fork-only slots (`214a_`) extend a legacy slot: they run right after it.
+  const forkSlotOrder = migrationFiles.filter((file) => /^\d{3}[a-z]_/.test(file));
   // Same-length digit prefixes: text order IS numeric order among the timestamped files.
   const timestampTextOrder = migrationFiles.filter((file) => /^\d{14}_/.test(file));
   assert.ok(
@@ -221,10 +223,18 @@ test("the real migrations directory keeps its legacy text order, timestamps afte
     `expected the full legacy set, got ${legacyTextOrder.length}`
   );
   assert.equal(
-    legacyTextOrder.length + timestampTextOrder.length,
+    legacyTextOrder.length + forkSlotOrder.length + timestampTextOrder.length,
     migrationFiles.length,
-    "every migration prefix is either three digits (legacy) or fourteen (timestamp)"
+    "every migration prefix is three digits plus an optional fork letter (legacy), or fourteen (timestamp)"
   );
+
+  // Slot order: each fork slot lands right after the legacy file of the same number.
+  const slotOrder = [...legacyTextOrder];
+  for (const forkFile of forkSlotOrder) {
+    const slot = forkFile.slice(0, 3);
+    const at = slotOrder.findIndex((file) => file.startsWith(`${slot}_`));
+    slotOrder.splice(at === -1 ? slotOrder.length : at + 1, 0, forkFile);
+  }
 
   const runnerOrder = runner.getMigrationFiles().map((file) => path.basename(file.path));
   assert.deepEqual(
@@ -235,7 +245,7 @@ test("the real migrations directory keeps its legacy text order, timestamps afte
   );
   assert.deepEqual(
     runnerOrder,
-    [...legacyTextOrder, ...timestampTextOrder],
+    [...slotOrder, ...timestampTextOrder],
     "every timestamped migration comes after the whole legacy set, in numeric order"
   );
 });

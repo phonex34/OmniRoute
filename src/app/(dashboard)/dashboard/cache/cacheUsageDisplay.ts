@@ -9,10 +9,14 @@ export function cacheMetric(
     ? unknown
     : `${value.toLocaleString()}${complete === false ? ` (${partial})` : ""}`;
 }
+/**
+ * `complete` is optional: a rate computed over the known-subset denominator needs no
+ * flag, while a rate over an all-rows denominator keeps passing it.
+ */
 export function cacheRatio(
   numerator: number | null | undefined,
   denominator: number,
-  complete: boolean | undefined
+  complete?: boolean
 ): number | null {
   if (numerator == null || complete === false) return null;
   return denominator > 0 ? (numerator / denominator) * 100 : 0;
