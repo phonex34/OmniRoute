@@ -26,7 +26,10 @@ type Anomalies = {
   missingLegacyTop?: string[];
   missingLegacyBottom?: string[];
   legacyCount?: number;
+  forkSlotCount?: number;
   timestampCount?: number;
+  forkSlotVersions?: string[];
+  orphanForkSlots?: string[];
 };
 
 type AnomalyOptions = { now?: Date | number; legacyMax?: number; legacyMin?: number };
@@ -252,6 +255,23 @@ test("date-and-time migration names are accepted and counted separately", () => 
   assert.equal(r.timestampCount, 2);
 });
 
+test("a fork slot never masks the deletion of the numbered migration it extends", () => {
+  const files = ["001_a.sql", "002_b.sql", "003_c.sql", "003a_fork.sql", "004_d.sql"];
+  const withNumbered = find(files, EMPTY, EMPTY, { legacyMax: 4 });
+  assert.deepEqual(withNumbered.gaps, [], "003 is on disk, so 003a extends an existing slot");
+  assert.deepEqual(withNumbered.orphanForkSlots, []);
+  assert.deepEqual(withNumbered.forkSlotVersions, ["003a"]);
+
+  const withoutNumbered = find(
+    files.filter((file) => file !== "003_c.sql"),
+    EMPTY,
+    EMPTY,
+    { legacyMax: 4 }
+  );
+  assert.deepEqual(withoutNumbered.gaps, ["003"], "deleting 003_c.sql must still be reported");
+  assert.deepEqual(withoutNumbered.orphanForkSlots, ["003a"]);
+});
+
 const INVALID_EXAMPLES: Array<[string, RegExp]> = [
   ["240_x.sql", /depois do corte/],
   ["0239_x.sql", /4 dígito/],
@@ -437,7 +457,10 @@ test("the gate script exits 0 on the real tree and prints both counts", async ()
     env: gateEnv(),
   });
   assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stdout, new RegExp(`antiga\\(s\\) 001–${LEGACY_TOP}, \\d+ por data`));
+  assert.match(
+    run.stdout,
+    new RegExp(`antiga\\(s\\) 001–${LEGACY_TOP}, \\d+ slot\\(s\\) de fork, \\d+ por data`)
+  );
 });
 
 // --- End-to-end: the gate's main() against a scratch copy of the migrations dir ---------

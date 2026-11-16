@@ -253,10 +253,8 @@ export function getMigrationFiles(): Array<{ version: string; name: string; path
   // (superseded duplicates) keep their file-name order, as with the old text sort.
   //
   // A trailing letter (`214a_`) marks a fork-only migration: it never takes a
-  // number upstream will use next. `compareMigrationFiles` keeps it in the
-  // catch-all version group, so a fork migration added after the base has already
-  // shipped applies once, at the end — the same database state a fresh install
-  // reaches, because it only adds its own columns and index.
+  // number upstream will use next, and `compareMigrationFiles` orders it right
+  // after its upstream slot.
   const files = (
     fs
       .readdirSync(MIGRATIONS_DIR)
