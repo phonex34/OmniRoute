@@ -25,7 +25,6 @@ import {
 import {
   extractUsage,
   hasValidUsage,
-  estimateUsage,
   isEstimatedUsage,
   logUsage,
   addBufferToUsage,

@@ -83,6 +83,10 @@ vi.mock("next-intl", () => ({
         "cache.noEntries": "No cache entries found",
         "cache.clearAll": "Clear Semantic Cache",
         "settings.enabled": "Enabled",
+        "common.usageEvidence.unknown": "unknown",
+        "common.usageEvidence.historicalUnknown": "Some usage has unknown provenance",
+        "common.usageEvidence.estimated": "estimated",
+        "common.usageEvidence.containsEstimates": "Contains estimates",
         disabled: "Disabled",
       };
 
@@ -216,5 +220,99 @@ describe("CachePage", () => {
 
     expect(screen.getByText("Entries")).toBeInTheDocument();
     expect(screen.getByText("Active Dedup Keys")).toBeInTheDocument();
+  });
+
+  it("still reports rates when some rows never reported cache tokens", async () => {
+    // #20271 stores NULL — not a measured zero — when a provider omits the cache
+    // counter. Before this test's fix one such row turned every aggregate rate into
+    // "N/A"; the rate must instead be computed over the rows that did report.
+    fetchMock.mockImplementation(async (input: string) => {
+      if (input.startsWith("/api/cache/entries")) {
+        return {
+          ok: true,
+          json: async () => ({
+            entries: [],
+            pagination: { page: 1, limit: 20, total: 0, totalPages: 0 },
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          semanticCache: {
+            memoryEntries: 0,
+            dbEntries: 0,
+            hits: 0,
+            misses: 0,
+            hitRate: "0.0",
+            tokensSaved: 0,
+          },
+          promptCache: {
+            totalRequests: 10,
+            requestsWithCacheControl: 6,
+            cacheReadRequests: 5,
+            requestsWithKnownCacheRead: 9,
+            totalInputTokens: 1000,
+            inputTokensWithKnownCacheRead: 900,
+            totalCachedTokens: 550,
+            totalCacheCreationTokens: 180,
+            totalCachedTokensComplete: false,
+            totalCacheCreationTokensComplete: false,
+            tokensSaved: 550,
+            estimatedCostSaved: 0.12,
+            byProvider: {
+              codex: {
+                requests: 6,
+                totalRequests: 10,
+                cachedRequests: 6,
+                cacheReadRequests: 5,
+                requestsWithKnownCacheRead: 9,
+                inputTokens: 1000,
+                inputTokensWithKnownCacheRead: 900,
+                cachedTokens: 550,
+                cacheCreationTokens: null,
+                cachedTokensComplete: false,
+                cacheCreationTokensComplete: false,
+              },
+            },
+            byStrategy: {},
+            lastUpdated: "2026-11-16T09:35:00.000Z",
+          },
+          trend: [
+            {
+              timestamp: "2026-11-16T09:00:00.000Z",
+              requests: 10,
+              cachedRequests: 6,
+              cacheReadRequests: 5,
+              requestsWithKnownCacheRead: 9,
+              inputTokens: 1000,
+              inputTokensWithKnownCacheRead: 900,
+              cachedTokens: 550,
+              cacheCreationTokens: null,
+              cachedTokensComplete: false,
+              cacheCreationTokensComplete: false,
+            },
+          ],
+          idempotency: { activeKeys: 0, windowMs: 5000 },
+          config: { semanticCacheEnabled: false },
+        }),
+      };
+    });
+
+    render(<CachePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Breakdown by Provider")).toBeInTheDocument();
+    });
+
+    // 550 / 900 known input tokens — not N/A just because one row is unknown.
+    expect(screen.getAllByText("61.1%").length).toBeGreaterThan(0);
+    // 5 read hits / 9 requests with a reported read counter. A write-only row
+    // (cachedRequests 6) must not enter the numerator: 6/9 = 66.7% would be wrong.
+    expect(screen.getAllByText("55.6%").length).toBeGreaterThan(0);
+    expect(screen.queryByText("66.7%")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Some usage has unknown provenance/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("N/A")).not.toBeInTheDocument();
   });
 });
