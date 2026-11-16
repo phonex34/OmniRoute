@@ -184,7 +184,10 @@ export function classifyDirectoryEntries(entries) {
  *   invalidNames: Array<{filename:string,code:string,reason:string}>,
  *   missingLegacyTop: string[],
  *   missingLegacyBottom: string[],
+ *   forkSlotVersions: string[],
+ *   orphanForkSlots: string[],
  *   legacyCount: number,
+ *   forkSlotCount: number,
  *   timestampCount: number,
  * }}
  */
@@ -198,8 +201,13 @@ export function findMigrationAnomalies(filenames, knownDuplicates, knownGaps, op
   const badNames = [];
   const invalidNames = [];
   const byVersion = new Map();
+  // Só slots NUMERADOS entram no conjunto de presença/gaps: um slot de fork (`214a`) estende
+  // uma migration upstream existente, nunca substitui o número. Se entrasse aqui, apagar
+  // `214_…sql` ficaria mascarado pela presença de `214a_…sql`.
   const legacyVersions = new Set();
+  const forkSlotVersions = [];
   let legacyCount = 0;
+  let forkSlotCount = 0;
   let timestampCount = 0;
 
   for (const filename of filenames) {
@@ -211,7 +219,12 @@ export function findMigrationAnomalies(filenames, knownDuplicates, knownGaps, op
     }
     if (parsed.kind === "legacy") {
       legacyCount += 1;
-      legacyVersions.add(parsed.version);
+      if (parsed.forkSlot) {
+        forkSlotCount += 1;
+        forkSlotVersions.push(parsed.version);
+      } else {
+        legacyVersions.add(parsed.version);
+      }
     } else {
       timestampCount += 1;
     }
@@ -253,6 +266,12 @@ export function findMigrationAnomalies(filenames, knownDuplicates, knownGaps, op
     for (let n = legacyMin; n < min; n++) missingLegacyBottom.push(pad3(n));
   }
 
+  // Slot de fork sem o slot numerado correspondente: o fork apontou para um número que não
+  // existe no diretório (migration upstream apagada, ou letra inventada).
+  const orphanForkSlots = forkSlotVersions
+    .filter((version) => !legacyVersions.has(version.slice(0, -1)))
+    .sort();
+
   return {
     duplicates,
     gaps,
@@ -260,7 +279,10 @@ export function findMigrationAnomalies(filenames, knownDuplicates, knownGaps, op
     invalidNames,
     missingLegacyTop,
     missingLegacyBottom,
+    forkSlotVersions,
+    orphanForkSlots,
     legacyCount,
+    forkSlotCount,
     timestampCount,
   };
 }
@@ -608,7 +630,9 @@ function main() {
     invalidNames,
     missingLegacyTop,
     missingLegacyBottom,
+    orphanForkSlots,
     legacyCount,
+    forkSlotCount,
     timestampCount,
   } = findMigrationAnomalies(filenames, KNOWN_DUPLICATE_VERSIONS, KNOWN_GAPS);
 
@@ -621,6 +645,14 @@ function main() {
   }
   for (const { filename, code, reason } of [...invalidEntries, ...invalidNames]) {
     problems.push(`  ✗ nome inválido: ${filename} — ${reason}\n    → ${hintForInvalid(code)}`);
+  }
+  for (const version of orphanForkSlots) {
+    const slot = version.slice(0, -1);
+    problems.push(
+      `  ✗ slot de fork ${version} sem a migration numerada ${slot}: um slot de fork ` +
+        `estende um slot upstream existente\n    → restaure ` +
+        `${MIGRATIONS_REL_DIR}/${slot}_*.sql (ou remova o arquivo do slot de fork)`
+    );
   }
   for (const d of duplicates) {
     problems.push(
@@ -670,7 +702,8 @@ function main() {
   if (!process.exitCode) {
     console.log(
       `[check-migration-numbering] OK (${filenames.length} migrations: ` +
-        `${legacyCount} antiga(s) 001–${LEGACY_MIGRATION_MAX}, ${timestampCount} por data; ` +
+        `${legacyCount - forkSlotCount} antiga(s) 001–${LEGACY_MIGRATION_MAX}, ` +
+        `${forkSlotCount} slot(s) de fork, ${timestampCount} por data; ` +
         `${KNOWN_GAPS.size} gap(s) conhecido(s), ${KNOWN_DUPLICATE_VERSIONS.size} duplicata(s) conhecida(s))`
     );
   }
