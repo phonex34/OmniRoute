@@ -132,9 +132,13 @@ test("the migration list is the real directory, and it is not empty", { skip: !d
   const files = runner.getMigrationFiles();
   const onDisk = fs
     .readdirSync(REAL_MIGRATIONS_DIR)
-    .filter((file) => /^(\d+)_(.+)\.sql$/.test(file));
+    .filter((file) => /^(\d+[a-z]?)_(.+)\.sql$/.test(file));
   assert.ok(files.length >= 236, `expected the full migration set, got ${files.length}`);
-  assert.equal(files.length, onDisk.length, "every NNN_/timestamp file on disk is listed");
+  assert.equal(
+    files.length,
+    onDisk.length,
+    "every NNN_/fork-slot/timestamp file on disk is listed"
+  );
   for (const file of files) {
     assert.equal(path.dirname(file.path), REAL_MIGRATIONS_DIR);
   }

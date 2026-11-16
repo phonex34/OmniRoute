@@ -73,10 +73,22 @@ const REAL_VERSIONS = REAL_FILES.map((file) => /^(\d+)_/.exec(file)?.[1]).filter
 );
 
 const isTimestamp = (version: string): boolean => /^\d{14}$/.test(version);
+/** Main-set version: digits, plus the fork's optional trailing letter (`214a`). */
+const isMainVersion = (version: string): boolean => /^\d+[a-z]?$/.test(version);
+/**
+ * Numeric order of main-set versions: the digit prefix by value (BigInt, so no
+ * precision cliff), then the fork letter — `214` < `214a` < `215`.
+ */
 function numericOrder(versions: string[]): string[] {
+  const key = (version: string): [bigint, string] => {
+    const match = /^(\d+)([a-z]?)$/.exec(version);
+    if (!match) return [BigInt(version), ""];
+    return [BigInt(match[1]), match[2]];
+  };
   return [...versions].sort((a, b) => {
-    const [x, y] = [BigInt(a), BigInt(b)];
-    return x < y ? -1 : x > y ? 1 : 0;
+    const [x, y] = [key(a), key(b)];
+    if (x[0] !== y[0]) return x[0] < y[0] ? -1 : 1;
+    return x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0;
   });
 }
 
@@ -370,7 +382,7 @@ test("(iv) ee- namespace runs after every main migration, timestamped ones inclu
     const firstEe = versions.findIndex((version) => version.startsWith("ee-"));
     assert.deepEqual(versions.slice(firstEe), ["ee-001", "ee-002", "ee-010"]);
     assert.ok(
-      versions.slice(0, firstEe).every((version) => /^\d+$/.test(version)),
+      versions.slice(0, firstEe).every((version) => isMainVersion(version)),
       "only main-set versions may precede the ee- namespace"
     );
     const mainBeforeEe = new Set(versions.slice(0, firstEe));
@@ -393,7 +405,7 @@ test("(iv) ee- namespace runs after every main migration, timestamped ones inclu
     const fileVersions = runner.getMigrationFiles().map((file) => file.version);
     assert.deepEqual(fileVersions.slice(-3), ["ee-001", "ee-002", "ee-010"]);
     assert.ok(
-      fileVersions.slice(0, -3).every((version) => /^\d+$/.test(version)),
+      fileVersions.slice(0, -3).every((version) => isMainVersion(version)),
       "every main-set file is listed before the ee- namespace"
     );
     assert.ok(fileVersions.slice(0, -3).includes("20991115000000"));

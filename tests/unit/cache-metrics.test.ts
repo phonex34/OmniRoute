@@ -132,5 +132,39 @@ describe("Cache Metrics Database", () => {
       // Clean up
       db.prepare("DELETE FROM usage_history WHERE provider = 'test-provider'").run();
     });
+
+    test("keeps a known-subset denominator when a row never reported cache tokens", async () => {
+      // #20271: a provider that omits the cache counter stores NULL, not a measured 0.
+      // One such row must not erase the provider's rate: the denominator is the rows
+      // that DID report it.
+      db.prepare("DELETE FROM usage_history WHERE provider = 'partial-provider'").run();
+      const insert = db.prepare(`
+        INSERT INTO usage_history (provider, model, tokens_input, tokens_cache_read,
+          tokens_cache_creation, timestamp)
+        VALUES (?, 'partial-model', ?, ?, ?, ?)
+      `);
+      const now = new Date().toISOString();
+      insert.run("partial-provider", 1000, 900, 0, now);
+      insert.run("partial-provider", 500, 100, 0, now);
+      insert.run("partial-provider", 700, null, null, now);
+      // Write-only evidence: the provider reported a cache write but never a read.
+      // It must stay out of both the hit count and the read denominator, or the rate
+      // would exceed 100%.
+      insert.run("partial-provider", 1000, null, 500, now);
+
+      const metrics = await getCacheMetrics();
+      const partial = metrics.byProvider["partial-provider"];
+
+      assert.equal(partial.cachedTokens, 1000);
+      assert.equal(partial.inputTokensWithKnownCacheRead, 1500);
+      assert.equal(partial.requestsWithKnownCacheRead, 2);
+      assert.equal(partial.cacheReadRequests, 2);
+      assert.ok(partial.cacheReadRequests <= partial.requestsWithKnownCacheRead);
+      assert.equal(partial.cachedRequests, 3, "activity count still sees the write-only row");
+      assert.equal(partial.cachedTokensComplete, false);
+      assert.equal(partial.totalRequests, 4);
+
+      db.prepare("DELETE FROM usage_history WHERE provider = 'partial-provider'").run();
+    });
   });
 });
