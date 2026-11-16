@@ -19,8 +19,10 @@
  *
  * Ledger versions fall into three groups, ordered group by group:
  *
- *   0. main set — digits only (`001`, `239`, `20261113120000`): numeric value,
- *      with arbitrary precision (no `Number`, so nothing past 2^53 can tie).
+ *   0. main set — digits only (`001`, `239`, `20261113120000`), plus the fork's
+ *      `<digits><letter>` slots (`214a`): numeric value of the digit prefix, with
+ *      arbitrary precision (no `Number`, so nothing past 2^53 can tie), then the
+ *      letter, so a fork migration lands right after the upstream slot it extends.
  *   1. namespaced — `<namespace>-<digits>` (`ee-134`), from the directories in
  *      OMNIROUTE_EXTRA_MIGRATIONS_DIRS: always after the whole main set, then by
  *      namespace and by numeric value inside it. NOTE: this is the LISTING order
@@ -38,7 +40,7 @@
  * as null) is compared as "" — group 2 — so the order stays antisymmetric.
  */
 
-const MAIN_VERSION_PATTERN = /^\d+$/;
+const MAIN_VERSION_PATTERN = /^(\d+)([a-z]?)$/;
 const NAMESPACED_VERSION_PATTERN = /^([a-z][a-z0-9]*)-(\d+)$/;
 const TIMESTAMP_VERSION_PATTERN = /^\d{14}$/;
 
@@ -48,10 +50,13 @@ export function isTimestampVersion(version: string): boolean {
 }
 
 type ParsedVersion =
-  { group: 0; digits: string } | { group: 1; namespace: string; digits: string } | { group: 2 };
+  | { group: 0; digits: string; suffix: string }
+  | { group: 1; namespace: string; digits: string }
+  | { group: 2 };
 
 function parseVersion(version: string): ParsedVersion {
-  if (MAIN_VERSION_PATTERN.test(version)) return { group: 0, digits: version };
+  const main = MAIN_VERSION_PATTERN.exec(version);
+  if (main) return { group: 0, digits: main[1], suffix: main[2] };
   const namespaced = NAMESPACED_VERSION_PATTERN.exec(version);
   if (namespaced) return { group: 1, namespace: namespaced[1], digits: namespaced[2] };
   return { group: 2 };
@@ -87,7 +92,11 @@ export function compareMigrationVersions(rawA: string, rawB: string): number {
   if (left.group !== right.group) return left.group - right.group;
 
   if (left.group === 0 && right.group === 0) {
-    return compareDigitStrings(left.digits, right.digits) || compareStrings(a, b);
+    return (
+      compareDigitStrings(left.digits, right.digits) ||
+      compareStrings(left.suffix, right.suffix) ||
+      compareStrings(a, b)
+    );
   }
   if (left.group === 1 && right.group === 1) {
     return (
