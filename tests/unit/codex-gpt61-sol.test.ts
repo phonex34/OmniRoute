@@ -126,7 +126,7 @@ test("VS Code reasoning metadata knows GPT-6.1 Sol efforts and defaults", () => 
   const model = { id: `cx/${MODEL}`, owned_by: "codex", capabilities: { reasoning: true } };
   const values = reasoningMetadata.getReasoningEffortValues(model);
   assert.deepEqual(values, ["low", "medium", "high", "xhigh", "max", "ultra"]);
-  assert.equal(reasoningMetadata.getDefaultReasoningEffort(model), "low");
+  assert.equal(reasoningMetadata.getDefaultReasoningEffort(model), "medium");
 });
 
 test("Parenthesized Sol effort overrides keep the reasoning summary", () => {

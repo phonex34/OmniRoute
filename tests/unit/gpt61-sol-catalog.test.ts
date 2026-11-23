@@ -103,7 +103,7 @@ test("GPT-6.1 Sol uses the catalog medium default without changing explicit effo
       capabilities: { reasoning: true },
     };
     assert.deepEqual(reasoningMetadata.getReasoningEffortValues(model), EFFORTS);
-    assert.equal(reasoningMetadata.getDefaultReasoningEffort(model), "low");
+    assert.equal(reasoningMetadata.getDefaultReasoningEffort(model), "medium");
     assert.equal(reasoningMetadata.getReasoningVariantBaseModelId(`${model.id}-ultra`), model.id);
     assert.equal(supportsVscodeServiceTierVariants(model), true);
   }
